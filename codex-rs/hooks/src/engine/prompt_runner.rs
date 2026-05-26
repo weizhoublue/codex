@@ -92,7 +92,7 @@ struct PromptHookOutput {
 /// maps `ok:false` through the per-event behavior table so block/no-op/feedback
 /// semantics stay centralized.
 pub(crate) async fn run_prompt(
-    runner: &PromptHookRunner,
+    runner: Option<&PromptHookRunner>,
     handler: &ConfiguredHandler,
     input_json: &str,
     default_model: String,
@@ -115,6 +115,16 @@ pub(crate) async fn run_prompt(
             Some("command handler cannot run as a prompt hook".to_string()),
         );
     };
+    let Some(runner) = runner else {
+        return prompt_run_result(
+            started_at,
+            started,
+            /*exit_code*/ None,
+            String::new(),
+            Some("prompt hook cannot run because no prompt runner is configured".to_string()),
+        );
+    };
+
     let request = PromptHookRequest {
         event_name: handler.event_name,
         prompt: render_prompt(prompt, input_json),

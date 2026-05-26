@@ -18,7 +18,7 @@ async fn prompt_hook_uses_default_model_when_config_model_is_unset() {
     let handler = prompt_handler(/*model*/ None);
 
     let result = run_prompt(
-        &runner,
+        Some(&runner),
         &handler,
         r#"{"hook_event_name":"Stop"}"#,
         "gpt-thread".to_string(),
@@ -38,6 +38,23 @@ async fn prompt_hook_uses_default_model_when_config_model_is_unset() {
             prompt: "Check: {\"hook_event_name\":\"Stop\"}".to_string(),
             model: "gpt-thread".to_string(),
         }
+    );
+}
+
+#[tokio::test]
+async fn prompt_hook_without_runner_returns_error() {
+    let result = run_prompt(
+        /*runner*/ None,
+        &prompt_handler(/*model*/ None),
+        r#"{"hook_event_name":"Stop"}"#,
+        "gpt-thread".to_string(),
+    )
+    .await;
+
+    assert_eq!(result.exit_code, None);
+    assert_eq!(
+        result.error,
+        Some("prompt hook cannot run because no prompt runner is configured".to_string())
     );
 }
 
