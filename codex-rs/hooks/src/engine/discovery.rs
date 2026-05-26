@@ -1024,7 +1024,7 @@ mod tests {
             &mut display_order,
             &hook_handler_source(&source_path, &hook_states),
             HookEventName::SessionStart,
-            vec![prompt_group(None)],
+            vec![prompt_group(/*matcher*/ None)],
         );
 
         assert_eq!(handlers, Vec::<ConfiguredHandler>::new());
