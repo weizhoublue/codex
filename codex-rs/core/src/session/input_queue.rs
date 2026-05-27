@@ -197,6 +197,7 @@ impl InputQueue {
                     active_turn.turn_state.as_ref(),
                     input
                         .into_iter()
+                        .map(ResponseInputItem::with_stable_id)
                         .map(TurnInput::ResponseInputItem)
                         .collect(),
                 )

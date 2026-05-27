@@ -235,9 +235,18 @@ mod tests {
             codex_tools::ToolName::plain("extension_echo")
         );
         assert_eq!(captured_call.truncation_policy, truncation_policy);
+        let history_item_id = captured_call.conversation_history.items()[0]
+            .id()
+            .expect("recorded history item should have an id");
+        assert!(history_item_id.starts_with("msg_"));
+        let mut expected_history_item = history_item;
+        let ResponseItem::Message { id, .. } = &mut expected_history_item else {
+            panic!("test history item should be a message");
+        };
+        *id = Some(history_item_id.to_string());
         assert_eq!(
             captured_call.conversation_history.items(),
-            std::slice::from_ref(&history_item)
+            std::slice::from_ref(&expected_history_item)
         );
         match captured_call.payload {
             ToolPayload::Function { arguments } => {

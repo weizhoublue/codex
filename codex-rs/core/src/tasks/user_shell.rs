@@ -363,11 +363,12 @@ async fn persist_user_shell_output(
 
     let response_input_item = match output_item {
         ResponseItem::Message {
+            id,
             role,
             content,
             phase,
-            ..
         } => ResponseInputItem::Message {
+            id,
             role,
             content,
             phase,

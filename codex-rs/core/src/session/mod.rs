@@ -1195,7 +1195,11 @@ impl Session {
                     .await;
             }
             InitialHistory::Resumed(resumed_history) => {
-                let rollout_items = resumed_history.history;
+                let rollout_items = resumed_history
+                    .history
+                    .into_iter()
+                    .map(RolloutItem::with_stable_response_item_ids)
+                    .collect::<Vec<_>>();
                 let previous_turn_settings = self
                     .apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
@@ -1234,6 +1238,10 @@ impl Session {
                 }
             }
             InitialHistory::Forked(rollout_items) => {
+                let rollout_items = rollout_items
+                    .into_iter()
+                    .map(RolloutItem::with_stable_response_item_ids)
+                    .collect::<Vec<_>>();
                 self.apply_rollout_reconstruction(&turn_context, &rollout_items)
                     .await;
 
@@ -1882,6 +1890,7 @@ impl Session {
 
         if self
             .inject_response_items(vec![ResponseInputItem::Message {
+                id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
                 phase: None,
@@ -1979,6 +1988,7 @@ impl Session {
 
         if self
             .inject_response_items(vec![ResponseInputItem::Message {
+                id: None,
                 role: "developer".to_string(),
                 content: vec![ContentItem::InputText { text }],
                 phase: None,
@@ -2545,9 +2555,14 @@ impl Session {
         turn_context: &TurnContext,
         items: &[ResponseItem],
     ) {
-        self.record_into_history(items, turn_context).await;
-        self.persist_rollout_response_items(items).await;
-        self.send_raw_response_items(turn_context, items).await;
+        let items: Vec<ResponseItem> = items
+            .iter()
+            .cloned()
+            .map(ResponseItem::with_stable_id)
+            .collect();
+        self.record_into_history(&items, turn_context).await;
+        self.persist_rollout_response_items(&items).await;
+        self.send_raw_response_items(turn_context, &items).await;
     }
 
     /// Append ResponseItems to the in-memory conversation history only.
@@ -2556,6 +2571,11 @@ impl Session {
         items: &[ResponseItem],
         turn_context: &TurnContext,
     ) {
+        let items = items
+            .iter()
+            .cloned()
+            .map(ResponseItem::with_stable_id)
+            .collect::<Vec<_>>();
         let mut state = self.state.lock().await;
         state.record_items(items.iter(), turn_context.truncation_policy);
     }
@@ -2624,8 +2644,24 @@ impl Session {
         &self,
         items: Vec<ResponseItem>,
         reference_context_item: Option<TurnContextItem>,
-        compacted_item: CompactedItem,
+        mut compacted_item: CompactedItem,
     ) {
+        let replacement_history_matches_items =
+            compacted_item.replacement_history.as_ref() == Some(&items);
+        let items: Vec<ResponseItem> = items
+            .into_iter()
+            .map(ResponseItem::with_stable_id)
+            .collect();
+        if replacement_history_matches_items {
+            compacted_item.replacement_history = Some(items.clone());
+        } else if let Some(replacement_history) = compacted_item.replacement_history.take() {
+            compacted_item.replacement_history = Some(
+                replacement_history
+                    .into_iter()
+                    .map(ResponseItem::with_stable_id)
+                    .collect(),
+            );
+        }
         {
             let mut state = self.state.lock().await;
             state.replace_history(items, reference_context_item.clone());
@@ -2910,8 +2946,13 @@ impl Session {
     }
 
     pub(crate) async fn persist_rollout_items(&self, items: &[RolloutItem]) {
+        let items = items
+            .iter()
+            .cloned()
+            .map(RolloutItem::with_stable_response_item_ids)
+            .collect::<Vec<_>>();
         if let Some(live_thread) = self.live_thread()
-            && let Err(e) = live_thread.append_items(items).await
+            && let Err(e) = live_thread.append_items(&items).await
         {
             error!("failed to record rollout items: {e:#}");
         }

@@ -608,11 +608,12 @@ impl CodexThread {
 fn pending_message_input_item(message: &ResponseItem) -> CodexResult<ResponseInputItem> {
     match message {
         ResponseItem::Message {
+            id,
             role,
             content,
             phase,
-            ..
         } => Ok(ResponseInputItem::Message {
+            id: id.clone(),
             role: role.clone(),
             content: content.clone(),
             phase: phase.clone(),

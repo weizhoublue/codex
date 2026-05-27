@@ -1830,6 +1830,7 @@ mod tests {
         assert_eq!(
             item,
             ResponseInputItem::Message {
+                id: None,
                 role: "user".to_string(),
                 content: vec![ContentItem::InputText {
                     text: "<goal_context>\nContinue working.\n</goal_context>".to_string(),
