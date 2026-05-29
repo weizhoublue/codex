@@ -1508,10 +1508,10 @@ async fn run_exec_server_command(
         codex_self_exe,
         arg0_paths.codex_linux_sandbox_exe.clone(),
     )?;
-    let config = load_exec_server_config(root_config_overrides, strict_config).await?;
-    let (_otel, telemetry) = init_exec_server_tracing(&config);
-    let exec_server_span = exec_server_root_span();
     if let Some(base_url) = cmd.remote {
+        let config = load_exec_server_config(root_config_overrides, strict_config).await?;
+        let (_otel, telemetry) = init_exec_server_tracing(Some(&config));
+        let exec_server_span = exec_server_root_span();
         let environment_id = cmd
             .environment_id
             .ok_or_else(|| anyhow::anyhow!("--environment-id is required when --remote is set"))?;
@@ -1533,6 +1533,15 @@ async fn run_exec_server_command(
             .await?;
         Ok(())
     } else {
+        let config = if strict_config {
+            Some(load_exec_server_config(root_config_overrides, strict_config).await?)
+        } else {
+            load_exec_server_config(root_config_overrides, /*strict_config*/ false)
+                .await
+                .ok()
+        };
+        let (_otel, telemetry) = init_exec_server_tracing(config.as_ref());
+        let exec_server_span = exec_server_root_span();
         exec_server_span.record("mode", "local");
         let listen_url = cmd
             .listen
@@ -1546,29 +1555,31 @@ async fn run_exec_server_command(
 }
 
 fn init_exec_server_tracing(
-    config: &codex_core::config::Config,
+    config: Option<&codex_core::config::Config>,
 ) -> (impl Send + Sync, codex_exec_server::ExecServerTelemetry) {
     let fmt_layer = tracing_subscriber::fmt::layer()
         .with_writer(std::io::stderr)
         .with_filter(exec_server_stderr_env_filter());
-    let otel = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        codex_core::otel_init::build_provider(
-            config,
-            env!("CARGO_PKG_VERSION"),
-            Some(EXEC_SERVER_OTEL_SERVICE_NAME),
-            EXEC_SERVER_DEFAULT_ANALYTICS_ENABLED,
-        )
-    })) {
-        Ok(Ok(otel)) => otel,
-        Ok(Err(err)) => {
-            eprintln!("Could not create otel exporter: {err}");
-            None
+    let otel = config.and_then(|config| {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            codex_core::otel_init::build_provider(
+                config,
+                env!("CARGO_PKG_VERSION"),
+                Some(EXEC_SERVER_OTEL_SERVICE_NAME),
+                EXEC_SERVER_DEFAULT_ANALYTICS_ENABLED,
+            )
+        })) {
+            Ok(Ok(otel)) => otel,
+            Ok(Err(err)) => {
+                eprintln!("Could not create otel exporter: {err}");
+                None
+            }
+            Err(_) => {
+                eprintln!("Could not create otel exporter: panicked during initialization");
+                None
+            }
         }
-        Err(_) => {
-            eprintln!("Could not create otel exporter: panicked during initialization");
-            None
-        }
-    };
+    });
     codex_core::otel_init::record_process_start(otel.as_ref(), EXEC_SERVER_OTEL_SERVICE_NAME);
 
     let otel_logger_layer = otel.as_ref().and_then(|otel| otel.logger_layer());

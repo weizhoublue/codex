@@ -18,91 +18,10 @@ use crate::server::ConnectionProcessor;
 
 const ERROR_BODY_PREVIEW_BYTES: usize = 4096;
 
-macro_rules! remote_event {
-    ($log:ident, $level:ident, $event_name:literal, $message:literal) => {{
-        $log!($message);
-        tracing::event!(
-            target: "codex_otel.log_only",
-            tracing::Level::$level,
-            event.name = $event_name,
-            $message
-        );
-        tracing::event!(
-            target: "codex_otel.trace_safe",
-            tracing::Level::$level,
-            event.name = $event_name,
-            $message
-        );
-    }};
-    ($log:ident, $level:ident, $attempt:expr, $event_name:literal, $message:literal) => {{
-        $log!(attempt = $attempt, $message);
-        tracing::event!(
-            target: "codex_otel.log_only",
-            tracing::Level::$level,
-            event.name = $event_name,
-            attempt = $attempt,
-            $message
-        );
-        tracing::event!(
-            target: "codex_otel.trace_safe",
-            tracing::Level::$level,
-            event.name = $event_name,
-            attempt = $attempt,
-            $message
-        );
-    }};
-    ($log:ident, $level:ident, with_error $error:expr, $event_name:literal, $message:literal) => {{
-        let _ = &$error;
-        $log!($message);
-        tracing::event!(
-            target: "codex_otel.log_only",
-            tracing::Level::$level,
-            event.name = $event_name,
-            $message
-        );
-        tracing::event!(
-            target: "codex_otel.trace_safe",
-            tracing::Level::$level,
-            event.name = $event_name,
-            $message
-        );
-    }};
-    ($log:ident, $level:ident, $attempt:expr, with_error $error:expr, $event_name:literal, $message:literal) => {{
-        let _ = &$error;
-        $log!(attempt = $attempt, $message);
-        tracing::event!(
-            target: "codex_otel.log_only",
-            tracing::Level::$level,
-            event.name = $event_name,
-            attempt = $attempt,
-            $message
-        );
-        tracing::event!(
-            target: "codex_otel.trace_safe",
-            tracing::Level::$level,
-            event.name = $event_name,
-            attempt = $attempt,
-            $message
-        );
-    }};
-    ($log:ident, $level:ident, $attempt:expr, with_backoff_ms $backoff_ms:expr, $event_name:literal, $message:literal) => {{
-        $log!(attempt = $attempt, backoff_ms = $backoff_ms, $message);
-        tracing::event!(
-            target: "codex_otel.log_only",
-            tracing::Level::$level,
-            event.name = $event_name,
-            attempt = $attempt,
-            backoff_ms = $backoff_ms,
-            $message
-        );
-        tracing::event!(
-            target: "codex_otel.trace_safe",
-            tracing::Level::$level,
-            event.name = $event_name,
-            attempt = $attempt,
-            backoff_ms = $backoff_ms,
-            $message
-        );
+macro_rules! emit_remote_otel_event {
+    ($level:ident, $($fields:tt)*) => {{
+        tracing::event!(target: "codex_otel.log_only", tracing::Level::$level, $($fields)*);
+        tracing::event!(target: "codex_otel.trace_safe", tracing::Level::$level, $($fields)*);
     }};
 }
 
@@ -237,53 +156,61 @@ pub async fn run_remote_environment(
         let response = match client.register_environment(&config.environment_id).await {
             Ok(response) => response,
             Err(err) => {
-                remote_event!(
-                    warn,
+                warn!(error = %err, "failed to register remote exec-server environment");
+                emit_remote_otel_event!(
                     WARN,
-                    with_error err,
-                    "codex.exec_server.remote_environment_registration_failed",
+                    event.name = "codex.exec_server.remote_environment_registration_failed",
                     "failed to register remote exec-server environment"
                 );
                 return Err(err);
             }
         };
         eprintln!("codex exec-server remote environment registered");
-        remote_event!(
-            info,
+        info!("codex exec-server remote environment registered");
+        emit_remote_otel_event!(
             INFO,
-            "codex.exec_server.remote_environment_registered",
+            event.name = "codex.exec_server.remote_environment_registered",
             "codex exec-server remote environment registered"
         );
 
         match connect_async(response.url.as_str()).await {
             Ok((websocket, _)) => {
                 connection_attempt += 1;
-                remote_event!(
-                    info,
+                info!(
+                    attempt = connection_attempt,
+                    "connected remote exec-server websocket"
+                );
+                emit_remote_otel_event!(
                     INFO,
-                    connection_attempt,
-                    "codex.exec_server.remote_websocket_connected",
+                    event.name = "codex.exec_server.remote_websocket_connected",
+                    attempt = connection_attempt,
                     "connected remote exec-server websocket"
                 );
                 backoff = Duration::from_secs(1);
                 run_multiplexed_environment(websocket, processor.clone()).await;
                 config.telemetry.relay_reconnect("disconnected");
-                remote_event!(
-                    warn,
+                warn!(
+                    attempt = connection_attempt,
+                    "remote exec-server websocket disconnected; retrying"
+                );
+                emit_remote_otel_event!(
                     WARN,
-                    connection_attempt,
-                    "codex.exec_server.remote_websocket_disconnected",
+                    event.name = "codex.exec_server.remote_websocket_disconnected",
+                    attempt = connection_attempt,
                     "remote exec-server websocket disconnected; retrying"
                 );
             }
             Err(err) => {
                 connection_attempt += 1;
-                remote_event!(
-                    warn,
+                warn!(
+                    attempt = connection_attempt,
+                    error = %err,
+                    "failed to connect remote exec-server websocket"
+                );
+                emit_remote_otel_event!(
                     WARN,
-                    connection_attempt,
-                    with_error err,
-                    "codex.exec_server.remote_websocket_connect_failed",
+                    event.name = "codex.exec_server.remote_websocket_connect_failed",
+                    attempt = connection_attempt,
                     "failed to connect remote exec-server websocket"
                 );
                 config.telemetry.relay_reconnect("connect_failed");
@@ -291,12 +218,15 @@ pub async fn run_remote_environment(
         }
 
         let backoff_ms = backoff.as_millis();
-        remote_event!(
-            info,
+        info!(
+            attempt = connection_attempt,
+            backoff_ms, "retrying remote exec-server websocket"
+        );
+        emit_remote_otel_event!(
             INFO,
-            connection_attempt,
-            with_backoff_ms backoff_ms,
-            "codex.exec_server.remote_websocket_retrying",
+            event.name = "codex.exec_server.remote_websocket_retrying",
+            attempt = connection_attempt,
+            backoff_ms,
             "retrying remote exec-server websocket"
         );
         sleep(backoff).await;
