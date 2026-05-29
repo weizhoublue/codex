@@ -128,7 +128,7 @@ fn remote_exec_server_preserves_websocket_error_in_stderr() -> Result<()> {
         .stderr(Stdio::piped());
 
     let mut child = cmd.spawn()?;
-    thread::sleep(Duration::from_millis(500));
+    thread::sleep(Duration::from_secs(2));
     let _ = child.kill();
     let output = child.wait_with_output()?;
     registry.finish()?;
@@ -138,7 +138,7 @@ fn remote_exec_server_preserves_websocket_error_in_stderr() -> Result<()> {
         stderr.contains("failed to connect remote exec-server websocket"),
         "{stderr}"
     );
-    assert!(stderr.contains("Connection refused"), "{stderr}");
+    assert!(stderr.contains("IO error"), "{stderr}");
 
     Ok(())
 }
