@@ -78,6 +78,7 @@ struct RunningProcess {
     closed: bool,
     started_at: Instant,
     metrics_finished: bool,
+    termination_requested: bool,
 }
 
 enum ProcessEntry {
@@ -245,6 +246,7 @@ impl LocalProcess {
                     closed: false,
                     started_at: Instant::now(),
                     metrics_finished: false,
+                    termination_requested: false,
                 })),
             );
         }
@@ -409,12 +411,13 @@ impl LocalProcess {
     ) -> Result<TerminateResponse, JSONRPCErrorError> {
         let _process_id = params.process_id.clone();
         let running = {
-            let process_map = self.inner.processes.lock().await;
-            match process_map.get(&params.process_id) {
+            let mut process_map = self.inner.processes.lock().await;
+            match process_map.get_mut(&params.process_id) {
                 Some(ProcessEntry::Running(process)) => {
                     if process.exit_code.is_some() {
                         return Ok(TerminateResponse { running: false });
                     }
+                    process.termination_requested = true;
                     process.session.terminate();
                     true
                 }
@@ -621,7 +624,7 @@ async fn watch_exit(
     output_notify: Arc<Notify>,
 ) {
     let exit_code = exit_rx.await.unwrap_or(-1);
-    let (notification, process_duration) = {
+    let (notification, process_duration, termination_requested) = {
         let mut processes = inner.processes.lock().await;
         if let Some(ProcessEntry::Running(process)) = processes.get_mut(&process_id) {
             let seq = process.next_seq;
@@ -639,14 +642,21 @@ async fn watch_exit(
                     exit_code,
                 }),
                 Some(process.started_at.elapsed()),
+                process.termination_requested,
             )
         } else {
-            (None, None)
+            (None, None, false)
         }
     };
     if let Some(process_duration) = process_duration {
         inner.telemetry.process_finished(
-            if exit_code == 0 { "success" } else { "error" },
+            if termination_requested {
+                "terminated"
+            } else if exit_code == 0 {
+                "success"
+            } else {
+                "error"
+            },
             process_duration,
         );
     }
@@ -922,6 +932,7 @@ mod tests {
                 closed: false,
                 started_at: Instant::now(),
                 metrics_finished: false,
+                termination_requested: false,
             })),
         );
         assert!(previous.is_none());
