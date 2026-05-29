@@ -40,7 +40,6 @@ use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use supports_color::Stream;
-use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
@@ -1511,11 +1510,9 @@ async fn run_exec_server_command(
     if let Some(base_url) = cmd.remote {
         let config = load_exec_server_config(root_config_overrides, strict_config).await?;
         let (_otel, telemetry) = init_exec_server_tracing(Some(&config));
-        let exec_server_span = exec_server_root_span();
         let environment_id = cmd
             .environment_id
             .ok_or_else(|| anyhow::anyhow!("--environment-id is required when --remote is set"))?;
-        exec_server_span.record("mode", "remote");
         let auth_provider =
             load_exec_server_remote_auth_provider(&config, &base_url, cmd.use_agent_identity_auth)
                 .await?;
@@ -1528,9 +1525,7 @@ async fn run_exec_server_command(
             remote_config.name = name;
         }
         let remote_config = remote_config.with_telemetry(telemetry);
-        codex_exec_server::run_remote_environment(remote_config, runtime_paths)
-            .instrument(exec_server_span)
-            .await?;
+        codex_exec_server::run_remote_environment(remote_config, runtime_paths).await?;
         Ok(())
     } else {
         let config = if strict_config {
@@ -1541,14 +1536,11 @@ async fn run_exec_server_command(
                 .ok()
         };
         let (_otel, telemetry) = init_exec_server_tracing(config.as_ref());
-        let exec_server_span = exec_server_root_span();
-        exec_server_span.record("mode", "local");
         let listen_url = cmd
             .listen
             .as_deref()
             .unwrap_or(codex_exec_server::DEFAULT_LISTEN_URL);
         codex_exec_server::run_main_with_telemetry(listen_url, runtime_paths, telemetry)
-            .instrument(exec_server_span)
             .await
             .map_err(anyhow::Error::from_boxed)
     }
@@ -1594,14 +1586,6 @@ fn init_exec_server_tracing(
         .try_init();
     tracing::callsite::rebuild_interest_cache();
     (otel, telemetry)
-}
-
-fn exec_server_root_span() -> tracing::Span {
-    tracing::info_span!(
-        "codex.exec_server",
-        otel.kind = "internal",
-        mode = tracing::field::Empty,
-    )
 }
 
 fn exec_server_stderr_env_filter() -> EnvFilter {

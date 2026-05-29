@@ -19,9 +19,26 @@ use crate::server::ConnectionProcessor;
 const ERROR_BODY_PREVIEW_BYTES: usize = 4096;
 
 macro_rules! emit_remote_otel_event {
-    ($level:ident, $($fields:tt)*) => {{
-        tracing::event!(target: "codex_otel.log_only", tracing::Level::$level, $($fields)*);
-        tracing::event!(target: "codex_otel.trace_safe", tracing::Level::$level, $($fields)*);
+    ($level:ident, $event_name:literal, $($fields:tt)*) => {{
+        let span = tracing::info_span!(
+            "codex.exec_server.remote_event",
+            otel.kind = "internal",
+            otel.name = $event_name,
+        );
+        span.in_scope(|| {
+            tracing::event!(
+                target: "codex_otel.log_only",
+                tracing::Level::$level,
+                event.name = $event_name,
+                $($fields)*
+            );
+            tracing::event!(
+                target: "codex_otel.trace_safe",
+                tracing::Level::$level,
+                event.name = $event_name,
+                $($fields)*
+            );
+        });
     }};
 }
 
@@ -159,7 +176,7 @@ pub async fn run_remote_environment(
                 warn!(error = %err, "failed to register remote exec-server environment");
                 emit_remote_otel_event!(
                     WARN,
-                    event.name = "codex.exec_server.remote_environment_registration_failed",
+                    "codex.exec_server.remote_environment_registration_failed",
                     "failed to register remote exec-server environment"
                 );
                 return Err(err);
@@ -169,7 +186,7 @@ pub async fn run_remote_environment(
         info!("codex exec-server remote environment registered");
         emit_remote_otel_event!(
             INFO,
-            event.name = "codex.exec_server.remote_environment_registered",
+            "codex.exec_server.remote_environment_registered",
             "codex exec-server remote environment registered"
         );
 
@@ -182,7 +199,7 @@ pub async fn run_remote_environment(
                 );
                 emit_remote_otel_event!(
                     INFO,
-                    event.name = "codex.exec_server.remote_websocket_connected",
+                    "codex.exec_server.remote_websocket_connected",
                     attempt = connection_attempt,
                     "connected remote exec-server websocket"
                 );
@@ -195,7 +212,7 @@ pub async fn run_remote_environment(
                 );
                 emit_remote_otel_event!(
                     WARN,
-                    event.name = "codex.exec_server.remote_websocket_disconnected",
+                    "codex.exec_server.remote_websocket_disconnected",
                     attempt = connection_attempt,
                     "remote exec-server websocket disconnected; retrying"
                 );
@@ -209,7 +226,7 @@ pub async fn run_remote_environment(
                 );
                 emit_remote_otel_event!(
                     WARN,
-                    event.name = "codex.exec_server.remote_websocket_connect_failed",
+                    "codex.exec_server.remote_websocket_connect_failed",
                     attempt = connection_attempt,
                     "failed to connect remote exec-server websocket"
                 );
@@ -224,7 +241,7 @@ pub async fn run_remote_environment(
         );
         emit_remote_otel_event!(
             INFO,
-            event.name = "codex.exec_server.remote_websocket_retrying",
+            "codex.exec_server.remote_websocket_retrying",
             attempt = connection_attempt,
             backoff_ms,
             "retrying remote exec-server websocket"
@@ -325,7 +342,12 @@ mod tests {
     use codex_api::AuthProvider;
     use http::HeaderMap;
     use http::HeaderValue;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use pretty_assertions::assert_eq;
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::prelude::*;
     use wiremock::Mock;
     use wiremock::MockServer;
     use wiremock::ResponseTemplate;
@@ -439,5 +461,37 @@ mod tests {
 
         assert!(debug.contains("<redacted>"));
         assert!(!debug.contains("workspace-123"));
+    }
+
+    #[test]
+    fn remote_otel_events_finish_trace_spans_immediately() {
+        let span_exporter = InMemorySpanExporter::default();
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_simple_exporter(span_exporter.clone())
+            .build();
+        let tracer = tracer_provider.tracer("exec-server-test");
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter_fn(codex_otel::OtelProvider::trace_export_filter)),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            emit_remote_otel_event!(
+                INFO,
+                "codex.exec_server.remote_environment_registered",
+                "codex exec-server remote environment registered"
+            );
+        });
+
+        tracer_provider.force_flush().expect("flush traces");
+        let spans = span_exporter.get_finished_spans().expect("span export");
+        assert!(
+            spans.iter().any(|span| {
+                span.name.as_ref() == "codex.exec_server.remote_environment_registered"
+            }),
+            "expected finished remote OTEL lifecycle span, got {spans:?}"
+        );
     }
 }
