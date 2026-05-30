@@ -20,6 +20,7 @@ pub(crate) fn default_thread_environment_selections(
         .map(|environment_id| TurnEnvironmentSelection {
             environment_id,
             cwd: cwd.clone(),
+            workspace_roots: Vec::new(),
         })
         .collect()
 }
@@ -75,6 +76,7 @@ pub(crate) fn resolve_environment_selections(
             environment_id,
             environment,
             cwd: selected_environment.cwd.clone(),
+            workspace_roots: selected_environment.workspace_roots.clone(),
             shell: None,
         });
     }
@@ -115,6 +117,7 @@ mod tests {
             vec![TurnEnvironmentSelection {
                 environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
                 cwd,
+                workspace_roots: Vec::new(),
             }]
         );
     }
@@ -143,10 +146,12 @@ url = "ws://127.0.0.1:8765"
                 TurnEnvironmentSelection {
                     environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
                     cwd: cwd.clone(),
+                    workspace_roots: Vec::new(),
                 },
                 TurnEnvironmentSelection {
                     environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
                     cwd,
+                    workspace_roots: Vec::new(),
                 },
             ]
         );
@@ -174,10 +179,12 @@ url = "ws://127.0.0.1:8765"
                 TurnEnvironmentSelection {
                     environment_id: "local".to_string(),
                     cwd: cwd.clone(),
+                    workspace_roots: Vec::new(),
                 },
                 TurnEnvironmentSelection {
                     environment_id: "local".to_string(),
                     cwd: cwd.join("other"),
+                    workspace_roots: Vec::new(),
                 },
             ],
         )
@@ -197,6 +204,7 @@ url = "ws://127.0.0.1:8765"
             &[TurnEnvironmentSelection {
                 environment_id: "local".to_string(),
                 cwd: selected_cwd,
+                workspace_roots: Vec::new(),
             }],
         )
         .expect("environment selections should resolve");

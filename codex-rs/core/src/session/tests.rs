@@ -3746,6 +3746,7 @@ fn turn_environments_for_tests(
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             environment: Arc::clone(environment),
             cwd: cwd.clone(),
+            workspace_roots: vec![cwd.clone()],
             shell: None,
         }],
     }
@@ -4364,6 +4365,7 @@ async fn cwd_update_does_not_rewrite_sticky_environment_cwd() {
         state.session_configuration.environments = vec![TurnEnvironmentSelection {
             environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: environment_cwd.clone(),
+            workspace_roots: Vec::new(),
         }];
         (original_cwd, environment_cwd)
     };
@@ -4403,6 +4405,7 @@ async fn absolute_cwd_update_with_turn_environment_is_allowed() {
                 environments: Some(vec![TurnEnvironmentSelection {
                     environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
                     cwd: absolute_cwd.clone(),
+                    workspace_roots: Vec::new(),
                 }]),
                 ..Default::default()
             },
@@ -4554,6 +4557,7 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
     let default_environments = vec![TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: config.cwd.clone(),
+        workspace_roots: config.workspace_roots.clone(),
     }];
     let session_configuration = SessionConfiguration {
         provider: config.model_provider.clone(),
@@ -4789,6 +4793,7 @@ async fn make_session_with_config_and_rx(
     let default_environments = vec![TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: config.cwd.clone(),
+        workspace_roots: config.workspace_roots.clone(),
     }];
     let session_configuration = SessionConfiguration {
         provider: config.model_provider.clone(),
@@ -4893,6 +4898,7 @@ async fn make_session_with_history_source_and_agent_control_and_rx(
     let default_environments = vec![TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: config.cwd.clone(),
+        workspace_roots: config.workspace_roots.clone(),
     }];
     let session_configuration = SessionConfiguration {
         provider: config.model_provider.clone(),
@@ -5611,6 +5617,7 @@ async fn turn_environments_set_primary_environment() {
                 environments: Some(vec![TurnEnvironmentSelection {
                     environment_id: "local".to_string(),
                     cwd: selected_cwd.clone(),
+                    workspace_roots: Vec::new(),
                 }]),
                 ..Default::default()
             },
@@ -5647,6 +5654,7 @@ async fn default_turn_overlays_session_cwd_onto_stored_thread_environments() {
         state.session_configuration.environments = vec![TurnEnvironmentSelection {
             environment_id: "local".to_string(),
             cwd: selected_cwd.clone(),
+            workspace_roots: Vec::new(),
         }];
     }
 
@@ -5702,6 +5710,7 @@ async fn primary_environment_uses_first_turn_environment() {
             environment_id: "second".to_string(),
             environment: Arc::clone(&first_environment.environment),
             cwd: second_cwd.clone(),
+            workspace_roots: vec![second_cwd.clone()],
             shell: None,
         });
 
@@ -5768,6 +5777,7 @@ async fn unknown_turn_environment_returns_error() {
                 environments: Some(vec![TurnEnvironmentSelection {
                     environment_id: "missing".to_string(),
                     cwd: original_configuration.cwd.clone(),
+                    workspace_roots: Vec::new(),
                 }]),
                 ..Default::default()
             },
@@ -5804,10 +5814,12 @@ async fn duplicate_turn_environment_returns_error_without_mutating_session() {
                     TurnEnvironmentSelection {
                         environment_id: "local".to_string(),
                         cwd: original_configuration.cwd.clone(),
+                        workspace_roots: Vec::new(),
                     },
                     TurnEnvironmentSelection {
                         environment_id: "local".to_string(),
                         cwd: original_configuration.cwd.join("second"),
+                        workspace_roots: Vec::new(),
                     },
                 ]),
                 ..Default::default()
@@ -6397,6 +6409,7 @@ where
     let default_environments = vec![TurnEnvironmentSelection {
         environment_id: codex_exec_server::LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: config.cwd.clone(),
+        workspace_roots: config.workspace_roots.clone(),
     }];
     let session_configuration = SessionConfiguration {
         provider: config.model_provider.clone(),
@@ -7601,6 +7614,58 @@ async fn turn_context_item_stores_split_file_system_sandbox_policy_when_differen
     assert_eq!(
         item.permission_profile,
         Some(turn_context.permission_profile())
+    );
+}
+
+#[tokio::test]
+async fn update_runtime_workspace_persists_resume_and_fork_baseline() {
+    let (mut session, turn_context) = make_session_and_context().await;
+    let rollout_path = attach_thread_persistence(&mut session).await;
+    let updated_cwd = test_path_buf("/workspace/updated").abs();
+    let updated_roots = vec![
+        test_path_buf("/workspace").abs(),
+        test_path_buf("/external").abs(),
+    ];
+
+    let snapshot = session
+        .update_runtime_workspace(
+            &turn_context,
+            Some(updated_cwd.clone()),
+            updated_roots.clone(),
+        )
+        .await
+        .expect("update runtime workspace");
+    let runtime_workspace = turn_context.runtime_workspace.snapshot().await;
+    let expected_context_item =
+        turn_context.to_turn_context_item_with_runtime_workspace(&runtime_workspace);
+
+    assert_eq!(snapshot.cwd, updated_cwd);
+    assert_eq!(snapshot.workspace_roots, updated_roots);
+    assert_eq!(
+        serde_json::to_value(session.reference_context_item().await)
+            .expect("serialize runtime workspace reference context item"),
+        serde_json::to_value(Some(expected_context_item.clone()))
+            .expect("serialize expected runtime workspace context item")
+    );
+
+    session.ensure_rollout_materialized().await;
+    session.flush_rollout().await.expect("rollout should flush");
+
+    let InitialHistory::Resumed(resumed) = RolloutRecorder::get_rollout_history(&rollout_path)
+        .await
+        .expect("read rollout history")
+    else {
+        panic!("expected resumed rollout history");
+    };
+    let persisted_context_item = resumed.history.iter().rev().find_map(|item| match item {
+        RolloutItem::TurnContext(ctx) => Some(ctx.clone()),
+        _ => None,
+    });
+    assert_eq!(
+        serde_json::to_value(persisted_context_item)
+            .expect("serialize persisted runtime workspace context item"),
+        serde_json::to_value(Some(expected_context_item))
+            .expect("serialize expected persisted runtime workspace context item")
     );
 }
 

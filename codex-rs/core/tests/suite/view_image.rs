@@ -459,6 +459,7 @@ async fn view_image_routes_to_selected_local_environment() -> anyhow::Result<()>
         Some(vec![TurnEnvironmentSelection {
             environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
             cwd: test.config.cwd.clone(),
+            workspace_roots: test.config.workspace_roots.clone(),
         }]),
     )
     .await?;
@@ -575,6 +576,7 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
     let local_selection = TurnEnvironmentSelection {
         environment_id: LOCAL_ENVIRONMENT_ID.to_string(),
         cwd: local_cwd.path().abs(),
+        workspace_roots: Vec::new(),
     };
     let remote_cwd = PathBuf::from(format!(
         "/tmp/codex-view-image-routing-{}",
@@ -596,6 +598,7 @@ async fn view_image_routes_to_selected_remote_environment() -> anyhow::Result<()
     let remote_selection = TurnEnvironmentSelection {
         environment_id: REMOTE_ENVIRONMENT_ID.to_string(),
         cwd: remote_cwd.clone(),
+        workspace_roots: Vec::new(),
     };
     let call_id = "call-view-image-multi-env";
     let response_mock = mount_sse_sequence(

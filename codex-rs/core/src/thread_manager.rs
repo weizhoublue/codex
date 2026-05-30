@@ -12,6 +12,7 @@ use crate::session::Codex;
 use crate::session::CodexSpawnArgs;
 use crate::session::CodexSpawnOk;
 use crate::session::INITIAL_SUBMIT_ID;
+use crate::session::runtime_workspace_baseline_from_initial_history;
 use crate::shell_snapshot::ShellSnapshot;
 use crate::tasks::InterruptedTurnHistoryMarker;
 use crate::tasks::interrupted_turn_history_marker;
@@ -84,6 +85,32 @@ static FORCE_TEST_THREAD_MANAGER_BEHAVIOR: AtomicBool = AtomicBool::new(false);
 
 type CapturedOps = Vec<(ThreadId, Op)>;
 type SharedCapturedOps = Arc<std::sync::Mutex<CapturedOps>>;
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct RuntimeWorkspaceReplayOverrides {
+    pub preserve_cwd: bool,
+    pub preserve_workspace_roots: bool,
+}
+
+fn hydrate_runtime_workspace_from_history(
+    config: &mut Config,
+    initial_history: &InitialHistory,
+    overrides: RuntimeWorkspaceReplayOverrides,
+) {
+    let Some(runtime_workspace) = runtime_workspace_baseline_from_initial_history(initial_history)
+    else {
+        return;
+    };
+    if !overrides.preserve_cwd {
+        config.cwd = runtime_workspace.cwd;
+    }
+    if !overrides.preserve_workspace_roots {
+        config.workspace_roots = runtime_workspace.workspace_roots.clone();
+        config
+            .permissions
+            .set_workspace_roots(runtime_workspace.workspace_roots);
+    }
+}
 
 pub(crate) fn set_thread_manager_test_mode_for_tests(enabled: bool) {
     FORCE_TEST_THREAD_MANAGER_BEHAVIOR.store(enabled, Ordering::Relaxed);
@@ -672,6 +699,31 @@ impl ThreadManager {
         persist_extended_history: bool,
         parent_trace: Option<W3cTraceContext>,
     ) -> CodexResult<NewThread> {
+        self.resume_thread_with_history_preserving_runtime_workspace_overrides(
+            config,
+            initial_history,
+            auth_manager,
+            persist_extended_history,
+            parent_trace,
+            RuntimeWorkspaceReplayOverrides::default(),
+        )
+        .await
+    }
+
+    pub async fn resume_thread_with_history_preserving_runtime_workspace_overrides(
+        &self,
+        mut config: Config,
+        initial_history: InitialHistory,
+        auth_manager: Arc<AuthManager>,
+        persist_extended_history: bool,
+        parent_trace: Option<W3cTraceContext>,
+        runtime_workspace_overrides: RuntimeWorkspaceReplayOverrides,
+    ) -> CodexResult<NewThread> {
+        hydrate_runtime_workspace_from_history(
+            &mut config,
+            &initial_history,
+            runtime_workspace_overrides,
+        );
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
             &config.cwd,
@@ -878,6 +930,32 @@ impl ThreadManager {
     where
         S: Into<ForkSnapshot>,
     {
+        self.fork_thread_from_history_preserving_runtime_workspace_overrides(
+            snapshot,
+            config,
+            history,
+            thread_source,
+            persist_extended_history,
+            parent_trace,
+            RuntimeWorkspaceReplayOverrides::default(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn fork_thread_from_history_preserving_runtime_workspace_overrides<S>(
+        &self,
+        snapshot: S,
+        config: Config,
+        history: InitialHistory,
+        thread_source: Option<ThreadSource>,
+        persist_extended_history: bool,
+        parent_trace: Option<W3cTraceContext>,
+        runtime_workspace_overrides: RuntimeWorkspaceReplayOverrides,
+    ) -> CodexResult<NewThread>
+    where
+        S: Into<ForkSnapshot>,
+    {
         self.fork_thread_with_initial_history(
             snapshot.into(),
             config,
@@ -885,18 +963,21 @@ impl ThreadManager {
             thread_source,
             persist_extended_history,
             parent_trace,
+            runtime_workspace_overrides,
         )
         .await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn fork_thread_with_initial_history(
         &self,
         snapshot: ForkSnapshot,
-        config: Config,
+        mut config: Config,
         history: InitialHistory,
         thread_source: Option<ThreadSource>,
         persist_extended_history: bool,
         parent_trace: Option<W3cTraceContext>,
+        runtime_workspace_overrides: RuntimeWorkspaceReplayOverrides,
     ) -> CodexResult<NewThread> {
         // `forked_from_id()` describes this history's existing lineage. When
         // forking a resumed thread, the child copies the resumed thread itself.
@@ -907,6 +988,7 @@ impl ThreadManager {
         };
         let interrupted_marker = InterruptedTurnHistoryMarker::from_config(&config);
         let history = fork_history_from_snapshot(snapshot, history, interrupted_marker);
+        hydrate_runtime_workspace_from_history(&mut config, &history, runtime_workspace_overrides);
         let environments = default_thread_environment_selections(
             self.state.environment_manager.as_ref(),
             &config.cwd,
@@ -1092,13 +1174,18 @@ impl ThreadManagerState {
         options: ResumeThreadWithHistoryOptions,
     ) -> CodexResult<NewThread> {
         let ResumeThreadWithHistoryOptions {
-            config,
+            mut config,
             initial_history,
             agent_control,
             session_source,
             inherited_shell_snapshot,
             inherited_exec_policy,
         } = options;
+        hydrate_runtime_workspace_from_history(
+            &mut config,
+            &initial_history,
+            RuntimeWorkspaceReplayOverrides::default(),
+        );
         let environments =
             default_thread_environment_selections(self.environment_manager.as_ref(), &config.cwd);
         let thread_source = initial_history.get_resumed_thread_source();

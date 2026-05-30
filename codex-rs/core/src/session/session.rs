@@ -430,6 +430,7 @@ pub(crate) struct SessionSettingsUpdate {
     /// environments stored on `SessionConfiguration`; `Some([])` explicitly
     /// disables environments for this turn.
     pub(crate) environments: Option<Vec<TurnEnvironmentSelection>>,
+    pub(crate) update_primary_environment: bool,
     pub(crate) personality: Option<Personality>,
     pub(crate) app_server_client_name: Option<String>,
     pub(crate) app_server_client_version: Option<String>,

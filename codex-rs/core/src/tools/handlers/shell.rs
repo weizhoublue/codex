@@ -78,16 +78,16 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
             "shell is unavailable in this session".to_string(),
         ));
     };
+    let runtime_workspace = turn.runtime_workspace.snapshot().await;
     let fs = turn_environment.environment.get_filesystem();
 
     let explicit_env_overrides = turn.shell_environment_policy.r#set.clone();
     let exec_permission_approvals_enabled =
         session.features().enabled(Feature::ExecPermissionApprovals);
     let requested_additional_permissions = additional_permissions.clone();
-    #[allow(deprecated)]
     let effective_additional_permissions = apply_granted_turn_permissions(
         session.as_ref(),
-        turn.cwd.as_path(),
+        runtime_workspace.cwd.as_path(),
         exec_params.sandbox_permissions,
         additional_permissions,
     )
@@ -160,17 +160,18 @@ async fn run_exec_like(args: RunExecLikeArgs) -> Result<FunctionToolOutput, Func
     );
     emitter.begin(event_ctx).await;
 
-    let file_system_sandbox_policy = turn.file_system_sandbox_policy();
+    let file_system_sandbox_policy = runtime_workspace
+        .permission_profile
+        .file_system_sandbox_policy();
     let exec_approval_requirement = session
         .services
         .exec_policy
         .create_exec_approval_requirement_for_command(ExecApprovalRequest {
             command: &exec_params.command,
             approval_policy: turn.approval_policy.value(),
-            permission_profile: turn.permission_profile(),
+            permission_profile: runtime_workspace.permission_profile.clone(),
             file_system_sandbox_policy: &file_system_sandbox_policy,
-            #[allow(deprecated)]
-            sandbox_cwd: turn.cwd.as_path(),
+            sandbox_cwd: runtime_workspace.cwd.as_path(),
             sandbox_permissions: if effective_additional_permissions.permissions_preapproved {
                 codex_protocol::models::SandboxPermissions::UseDefault
             } else {

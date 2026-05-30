@@ -7,6 +7,7 @@ use super::NetworkApprovalProtocol;
 use super::NetworkPolicyAmendment;
 use super::RequestPermissionProfile;
 use super::UserInput;
+use super::WorkspaceMutationApprovalRequest;
 use super::shared::v2_enum_from_core;
 use crate::protocol::item_builders::convert_patch_changes;
 use codex_experimental_api_macros::ExperimentalApi;
@@ -563,6 +564,7 @@ pub struct GuardianMcpToolCallReviewAction {
 pub struct GuardianRequestPermissionsReviewAction {
     pub reason: Option<String>,
     pub permissions: RequestPermissionProfile,
+    pub workspace_mutation: Option<WorkspaceMutationApprovalRequest>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -613,6 +615,7 @@ pub enum GuardianApprovalReviewAction {
     RequestPermissions {
         reason: Option<String>,
         permissions: RequestPermissionProfile,
+        workspace_mutation: Option<WorkspaceMutationApprovalRequest>,
     },
 }
 
@@ -669,9 +672,11 @@ impl From<CoreGuardianAssessmentAction> for GuardianApprovalReviewAction {
             CoreGuardianAssessmentAction::RequestPermissions {
                 reason,
                 permissions,
+                workspace_mutation,
             } => Self::RequestPermissions {
                 reason,
                 permissions: permissions.into(),
+                workspace_mutation: workspace_mutation.map(Into::into),
             },
         }
     }
@@ -730,9 +735,11 @@ impl From<GuardianApprovalReviewAction> for CoreGuardianAssessmentAction {
             GuardianApprovalReviewAction::RequestPermissions {
                 reason,
                 permissions,
+                workspace_mutation,
             } => Self::RequestPermissions {
                 reason,
                 permissions: permissions.into(),
+                workspace_mutation: workspace_mutation.map(Into::into),
             },
         }
     }
