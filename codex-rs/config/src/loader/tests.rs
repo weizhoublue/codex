@@ -14,6 +14,16 @@ struct TestFileSystem;
 
 #[async_trait]
 impl ExecutorFileSystem for TestFileSystem {
+    async fn canonicalize(
+        &self,
+        path: &AbsolutePathBuf,
+        _sandbox: Option<&FileSystemSandboxContext>,
+    ) -> FileSystemResult<AbsolutePathBuf> {
+        let path = tokio::fs::canonicalize(path.as_path()).await?;
+        AbsolutePathBuf::try_from(path)
+            .map_err(|err| io::Error::new(io::ErrorKind::InvalidData, err))
+    }
+
     async fn read_file(
         &self,
         path: &AbsolutePathBuf,
