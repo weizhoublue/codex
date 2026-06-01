@@ -24,8 +24,10 @@ use crate::config::Config;
 use crate::mcp::McpManager;
 use crate::plugins::list_tool_suggest_discoverable_plugins;
 use crate::session::INITIAL_SUBMIT_ID;
+use codex_config::AppRequirementToml;
 use codex_config::AppsRequirementsToml;
 use codex_config::types::AppToolApproval;
+use codex_config::types::ApprovalsReviewer;
 use codex_config::types::AppsConfigToml;
 use codex_config::types::ToolSuggestDiscoverableType;
 use codex_core_plugins::PluginsManager;
@@ -569,28 +571,64 @@ pub(crate) fn codex_app_tool_is_enabled(config: &Config, tool_info: &ToolInfo) -
 }
 
 pub(crate) fn mcp_approvals_reviewer_policy(config: &Config) -> McpApprovalsReviewerPolicy {
-    let codex_apps_by_connector_id = read_user_apps_config(config)
-        .map(|apps_config| {
-            apps_config
-                .apps
+    let apps_config = read_user_apps_config(config).unwrap_or_default();
+    let requirements_apps = config.config_layer_stack.requirements_toml().apps.as_ref();
+    let connector_ids = apps_config
+        .apps
+        .keys()
+        .chain(
+            requirements_apps
                 .into_iter()
-                .filter_map(|(connector_id, app)| {
-                    app.approvals_reviewer
-                        .filter(|reviewer| {
-                            config
-                                .config_layer_stack
-                                .requirements()
-                                .approvals_reviewer
-                                .can_set(reviewer)
-                                .is_ok()
-                        })
-                        .map(|reviewer| (connector_id, reviewer))
-                })
-                .collect()
+                .flat_map(|requirements| requirements.apps.keys()),
+        )
+        .cloned()
+        .collect::<HashSet<_>>();
+    let codex_apps_by_connector_id = connector_ids
+        .into_iter()
+        .filter_map(|connector_id| {
+            let app = apps_config.apps.get(&connector_id);
+            let requirement =
+                requirements_apps.and_then(|requirements| requirements.apps.get(&connector_id));
+            let configured = app.and_then(|app| app.approvals_reviewer);
+            if configured.is_none()
+                && requirement
+                    .and_then(|requirement| requirement.allowed_approvals_reviewers.as_ref())
+                    .is_none()
+            {
+                return None;
+            }
+            Some((
+                connector_id,
+                app_approvals_reviewer(config, configured, requirement),
+            ))
         })
-        .unwrap_or_default();
+        .collect();
 
     McpApprovalsReviewerPolicy::new(config.approvals_reviewer, codex_apps_by_connector_id)
+}
+
+fn app_approvals_reviewer(
+    config: &Config,
+    configured: Option<ApprovalsReviewer>,
+    requirement: Option<&AppRequirementToml>,
+) -> ApprovalsReviewer {
+    let app_allowed =
+        requirement.and_then(|requirement| requirement.allowed_approvals_reviewers.as_deref());
+    configured
+        .into_iter()
+        .chain([config.approvals_reviewer])
+        .chain(app_allowed.into_iter().flatten().copied())
+        .find(|reviewer| {
+            config
+                .config_layer_stack
+                .requirements()
+                .approvals_reviewer
+                .can_set(reviewer)
+                .is_ok()
+                && app_allowed.is_none_or(|allowed| allowed.contains(reviewer))
+        })
+        // An empty or incompatible managed allow-list must not route through Guardian.
+        .unwrap_or(ApprovalsReviewer::User)
 }
 
 fn read_apps_config(config: &Config) -> Option<AppsConfigToml> {
@@ -640,14 +678,13 @@ fn managed_app_tool_approval(
     tool_name: &str,
 ) -> Option<AppToolApproval> {
     let connector_id = connector_id?;
-    requirements_apps_config?
-        .apps
-        .get(connector_id)?
+    let requirement = requirements_apps_config?.apps.get(connector_id)?;
+    requirement
         .tools
-        .as_ref()?
-        .tools
-        .get(tool_name)?
-        .approval_mode
+        .as_ref()
+        .and_then(|tools| tools.tools.get(tool_name))
+        .and_then(|tool| tool.approval_mode)
+        .or(requirement.default_tools_approval_mode)
 }
 
 fn app_is_enabled(apps_config: &AppsConfigToml, connector_id: Option<&str>) -> bool {

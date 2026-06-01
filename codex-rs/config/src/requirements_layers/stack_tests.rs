@@ -226,6 +226,8 @@ shared = false
 
 [apps.connector_1]
 enabled = false
+allowed_approvals_reviewers = ["auto_review", "user"]
+default_tools_approval_mode = "prompt"
 
 [apps.connector_1.tools.search]
 approval_mode = "prompt"
@@ -244,6 +246,8 @@ shared = true
 
 [apps.connector_1]
 enabled = true
+allowed_approvals_reviewers = ["user"]
+default_tools_approval_mode = "approve"
 
 [apps.connector_1.tools.search]
 approval_mode = "approve"
@@ -264,6 +268,8 @@ shared = true
 
 [apps.connector_1]
 enabled = true
+allowed_approvals_reviewers = ["user"]
+default_tools_approval_mode = "approve"
 
 [apps.connector_1.tools.list]
 approval_mode = "prompt"

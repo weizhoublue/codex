@@ -764,12 +764,16 @@ impl AppToolsRequirementsToml {
 #[derive(Deserialize, Debug, Clone, Default, PartialEq, Eq)]
 pub struct AppRequirementToml {
     pub enabled: Option<bool>,
+    pub allowed_approvals_reviewers: Option<Vec<ApprovalsReviewer>>,
+    pub default_tools_approval_mode: Option<AppToolApproval>,
     pub tools: Option<AppToolsRequirementsToml>,
 }
 
 impl AppRequirementToml {
     pub fn is_empty(&self) -> bool {
         self.enabled.is_none()
+            && self.allowed_approvals_reviewers.is_none()
+            && self.default_tools_approval_mode.is_none()
             && self
                 .tools
                 .as_ref()
@@ -791,7 +795,8 @@ impl AppsRequirementsToml {
 
 /// Merge app requirements from a lower-precedence source into an existing higher-precedence set.
 /// This lets managed sources (for example Cloud/MDM) enforce setting disablement across layers,
-/// while exact tool approval settings keep the higher-precedence value when present.
+/// while app policy defaults and exact tool approval settings keep the higher-precedence value
+/// when present.
 pub(crate) fn merge_app_requirements_descending(
     base: &mut AppsRequirementsToml,
     incoming: AppsRequirementsToml,
@@ -806,6 +811,15 @@ pub(crate) fn merge_app_requirements_descending(
             } else {
                 higher_precedence.or(lower_precedence)
             };
+
+        if base_requirement.allowed_approvals_reviewers.is_none() {
+            base_requirement.allowed_approvals_reviewers =
+                incoming_requirement.allowed_approvals_reviewers;
+        }
+        if base_requirement.default_tools_approval_mode.is_none() {
+            base_requirement.default_tools_approval_mode =
+                incoming_requirement.default_tools_approval_mode;
+        }
 
         let Some(incoming_tools) = incoming_requirement.tools else {
             continue;
@@ -2048,6 +2062,8 @@ allowed_approvals_reviewers = ["user"]
         let toml_str = r#"
             [apps.connector_123123]
             enabled = false
+            allowed_approvals_reviewers = ["user"]
+            default_tools_approval_mode = "prompt"
         "#;
         let requirements: ConfigRequirementsToml = from_str(toml_str)?;
 
@@ -2058,7 +2074,9 @@ allowed_approvals_reviewers = ["user"]
                     "connector_123123".to_string(),
                     AppRequirementToml {
                         enabled: Some(false),
-                        tools: None,
+                        allowed_approvals_reviewers: Some(vec![ApprovalsReviewer::User]),
+                        default_tools_approval_mode: Some(AppToolApproval::Prompt),
+                        ..Default::default()
                     },
                 )]),
             })
@@ -2080,7 +2098,6 @@ allowed_approvals_reviewers = ["user"]
                 apps: BTreeMap::from([(
                     "connector_123123".to_string(),
                     AppRequirementToml {
-                        enabled: None,
                         tools: Some(AppToolsRequirementsToml {
                             tools: BTreeMap::from([(
                                 "calendar/list_events".to_string(),
@@ -2089,6 +2106,7 @@ allowed_approvals_reviewers = ["user"]
                                 },
                             )]),
                         }),
+                        ..Default::default()
                     },
                 )]),
             })
@@ -2105,7 +2123,7 @@ allowed_approvals_reviewers = ["user"]
                         (*app_id).to_string(),
                         AppRequirementToml {
                             enabled: *enabled,
-                            tools: None,
+                            ..Default::default()
                         },
                     )
                 })
@@ -2122,7 +2140,6 @@ allowed_approvals_reviewers = ["user"]
             apps: BTreeMap::from([(
                 app_id.to_string(),
                 AppRequirementToml {
-                    enabled: None,
                     tools: Some(AppToolsRequirementsToml {
                         tools: BTreeMap::from([(
                             tool_name.to_string(),
@@ -2131,6 +2148,7 @@ allowed_approvals_reviewers = ["user"]
                             },
                         )]),
                     }),
+                    ..Default::default()
                 },
             )]),
         }
@@ -2247,6 +2265,46 @@ allowed_approvals_reviewers = ["user"]
                 "calendar/list_events",
                 AppToolApproval::Approve,
             )
+        );
+    }
+
+    #[test]
+    fn merge_app_requirements_descending_preserves_higher_app_policy_defaults() {
+        let mut merged = AppsRequirementsToml {
+            apps: BTreeMap::from([(
+                "connector_123123".to_string(),
+                AppRequirementToml {
+                    allowed_approvals_reviewers: Some(vec![ApprovalsReviewer::User]),
+                    default_tools_approval_mode: Some(AppToolApproval::Prompt),
+                    ..Default::default()
+                },
+            )]),
+        };
+        let lower = AppsRequirementsToml {
+            apps: BTreeMap::from([(
+                "connector_123123".to_string(),
+                AppRequirementToml {
+                    allowed_approvals_reviewers: Some(vec![ApprovalsReviewer::AutoReview]),
+                    default_tools_approval_mode: Some(AppToolApproval::Approve),
+                    ..Default::default()
+                },
+            )]),
+        };
+
+        merge_app_requirements_descending(&mut merged, lower);
+
+        assert_eq!(
+            merged,
+            AppsRequirementsToml {
+                apps: BTreeMap::from([(
+                    "connector_123123".to_string(),
+                    AppRequirementToml {
+                        allowed_approvals_reviewers: Some(vec![ApprovalsReviewer::User]),
+                        default_tools_approval_mode: Some(AppToolApproval::Prompt),
+                        ..Default::default()
+                    },
+                )]),
+            }
         );
     }
 
