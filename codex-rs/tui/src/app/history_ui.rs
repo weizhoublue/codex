@@ -178,7 +178,59 @@ fn open_desktop_thread_url(url: &str) -> Result<(), String> {
     Ok(())
 }
 
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(target_os = "linux")]
+fn open_desktop_thread_url(url: &str) -> Result<(), String> {
+    if !crate::clipboard_paste::is_probably_wsl() {
+        return Err("Codex Desktop is only available on macOS and Windows".to_string());
+    }
+
+    let output = std::process::Command::new("powershell.exe")
+        .arg("-NoProfile")
+        .arg("-Command")
+        .arg(
+            r#"
+$ErrorActionPreference = 'Stop'
+$installLocation = (Get-AppxPackage -Name OpenAI.Codex -ErrorAction SilentlyContinue).InstallLocation
+if ([string]::IsNullOrWhiteSpace($installLocation)) {
+    Write-Error 'Codex Desktop package is not installed'
+    exit 1
+}
+
+$appDir = Join-Path $installLocation 'app'
+$exe = Join-Path $appDir 'Codex.exe'
+$app = Join-Path $appDir 'resources\app.asar'
+if (-not (Test-Path $exe)) {
+    Write-Error "Codex Desktop executable not found at $exe"
+    exit 1
+}
+if (-not (Test-Path $app)) {
+    Write-Error "Codex Desktop app bundle not found at $app"
+    exit 1
+}
+
+Start-Process -FilePath $exe -WorkingDirectory $appDir -ArgumentList @("""$app""", """$($args[0])""")
+"#,
+        )
+        .arg(url)
+        .output()
+        .map_err(|err| format!("failed to launch Codex Desktop through PowerShell: {err}"))?;
+
+    if output.status.success() {
+        Ok(())
+    } else {
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if stderr.is_empty() {
+            Err(format!(
+                "failed to launch Codex Desktop through PowerShell with {}",
+                output.status
+            ))
+        } else {
+            Err(stderr)
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
 fn open_desktop_thread_url(_url: &str) -> Result<(), String> {
     Err("Codex Desktop is only available on macOS and Windows".to_string())
 }

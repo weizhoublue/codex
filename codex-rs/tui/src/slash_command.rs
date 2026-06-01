@@ -242,10 +242,26 @@ impl SlashCommand {
         match self {
             SlashCommand::SandboxReadRoot => cfg!(target_os = "windows"),
             SlashCommand::Copy => !cfg!(target_os = "android"),
-            SlashCommand::App => cfg!(any(target_os = "macos", target_os = "windows")),
+            SlashCommand::App => desktop_app_command_visible(),
             SlashCommand::Rollout | SlashCommand::TestApproval => cfg!(debug_assertions),
             _ => true,
         }
+    }
+}
+
+fn desktop_app_command_visible() -> bool {
+    if cfg!(any(target_os = "macos", target_os = "windows")) {
+        return true;
+    }
+
+    #[cfg(target_os = "linux")]
+    {
+        crate::clipboard_paste::is_probably_wsl()
+    }
+
+    #[cfg(not(target_os = "linux"))]
+    {
+        false
     }
 }
 
