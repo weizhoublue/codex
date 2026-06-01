@@ -132,26 +132,9 @@ fn open_desktop_thread_url(url: &str) -> Result<(), String> {
     }
 }
 
-#[cfg(target_os = "windows")]
-fn open_desktop_thread_url(url: &str) -> Result<(), String> {
-    let status = std::process::Command::new("powershell.exe")
-        .arg("-NoProfile")
-        .arg("-Command")
-        .arg("& { param($target) Start-Process -FilePath $target }")
-        .arg(url)
-        .status()
-        .map_err(|err| format!("failed to open {url}: {err}"))?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(format!("failed to open {url} with {status}"))
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+#[cfg(not(target_os = "macos"))]
 fn open_desktop_thread_url(_url: &str) -> Result<(), String> {
-    Err("Codex Desktop is only available on macOS and Windows".to_string())
+    Err("Codex Desktop session handoff is only available on macOS".to_string())
 }
 
 #[cfg(test)]
