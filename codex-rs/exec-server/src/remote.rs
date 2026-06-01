@@ -572,7 +572,7 @@ mod tests {
             registration_span.in_scope(|| {});
             registration_span.record("result", "success");
             drop(registration_span);
-            let websocket_span = remote_websocket_connect_span(2);
+            let websocket_span = remote_websocket_connect_span(/*attempt*/ 2);
             websocket_span.in_scope(|| {});
             websocket_span.record("result", "success");
             drop(websocket_span);
