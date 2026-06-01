@@ -327,6 +327,7 @@ use codex_protocol::config_types::ReasoningSummary as ReasoningSummaryConfig;
 use codex_protocol::config_types::WindowsSandboxLevel;
 use codex_protocol::models::ResponseInputItem;
 use codex_protocol::models::ResponseItem;
+use codex_protocol::models::response_input_item_from_user_input_with_responses_codex_strict_mode;
 use codex_protocol::openai_models::ReasoningEffort as ReasoningEffortConfig;
 use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
 use codex_protocol::protocol::AskForApproval;
@@ -3085,7 +3086,16 @@ impl Session {
         // Persist the user message to history, but emit the turn item from `UserInput` so
         // UI-only `text_elements` are preserved. `ResponseItem::Message` does not carry
         // those spans, and `record_response_item_and_emit_turn_item` would drop them.
-        let response_item = ResponseItem::from(ResponseInputItem::from(input.to_vec()));
+        let response_input_item = if turn_context
+            .features
+            .get()
+            .enabled(Feature::ResponsesApiCodexStrictMode)
+        {
+            response_input_item_from_user_input_with_responses_codex_strict_mode(input.to_vec())
+        } else {
+            ResponseInputItem::from(input.to_vec())
+        };
+        let response_item = ResponseItem::from(response_input_item);
         self.record_conversation_items(turn_context, std::slice::from_ref(&response_item))
             .await;
         let mut user_message_item = UserMessageItem::new(input);

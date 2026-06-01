@@ -14,6 +14,8 @@ use app_test_support::format_with_current_shell_display;
 use app_test_support::to_response;
 use app_test_support::write_mock_responses_config_toml_with_chatgpt_base_url;
 use app_test_support::write_models_cache;
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use codex_app_server::INPUT_TOO_LARGE_ERROR_CODE;
 use codex_app_server::INVALID_PARAMS_ERROR_CODE;
 use codex_app_server_protocol::AdditionalContextEntry;
@@ -70,11 +72,17 @@ use codex_protocol::openai_models::ReasoningEffort;
 use codex_protocol::user_input::MAX_USER_INPUT_TEXT_CHARS;
 use core_test_support::responses;
 use core_test_support::skip_if_no_network;
+use image::DynamicImage;
+use image::GenericImageView;
+use image::ImageBuffer;
+use image::ImageFormat;
+use image::Rgba;
 use pretty_assertions::assert_eq;
 use serde_json::Value;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::io::Cursor;
 use std::path::Path;
 use tempfile::TempDir;
 use tokio::time::timeout;
@@ -101,7 +109,24 @@ fn body_contains(req: &wiremock::Request, text: &str) -> bool {
         .is_some_and(|body| body.contains(text))
 }
 
+struct LocalImageTurnResult {
+    input_images: Vec<Value>,
+    response_request_bodies: Vec<Value>,
+}
+
 async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>> {
+    Ok(
+        run_local_image_turn_with_options(detail, TINY_PNG_BYTES.to_vec(), &BTreeMap::default())
+            .await?
+            .input_images,
+    )
+}
+
+async fn run_local_image_turn_with_options(
+    detail: Option<ImageDetail>,
+    image_bytes: Vec<u8>,
+    feature_flags: &BTreeMap<Feature, bool>,
+) -> Result<LocalImageTurnResult> {
     // Two Codex turns hit the mock model (session start + turn/start).
     let responses = vec![
         create_final_assistant_message_sse_response("Done")?,
@@ -112,12 +137,7 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
     let server = create_mock_responses_server_sequence_unchecked(responses).await;
 
     let codex_home = TempDir::new()?;
-    create_config_toml(
-        codex_home.path(),
-        &server.uri(),
-        "never",
-        &BTreeMap::default(),
-    )?;
+    create_config_toml(codex_home.path(), &server.uri(), "never", feature_flags)?;
 
     let mut mcp = McpProcess::new(codex_home.path()).await?;
     timeout(DEFAULT_READ_TIMEOUT, mcp.initialize()).await??;
@@ -136,7 +156,7 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
     let ThreadStartResponse { thread, .. } = to_response::<ThreadStartResponse>(thread_resp)?;
 
     let image_path = codex_home.path().join("image.png");
-    std::fs::write(&image_path, TINY_PNG_BYTES)?;
+    std::fs::write(&image_path, image_bytes)?;
 
     let turn_req = mcp
         .send_turn_start_request(TurnStartParams {
@@ -163,15 +183,23 @@ async fn run_local_image_turn(detail: Option<ImageDetail>) -> Result<Vec<Value>>
     )
     .await??;
 
-    received_response_input_images(&server).await
+    let response_request_bodies = received_response_request_bodies(&server).await?;
+    let input_images = response_request_bodies
+        .iter()
+        .flat_map(input_images_from_response_request)
+        .collect();
+    Ok(LocalImageTurnResult {
+        input_images,
+        response_request_bodies,
+    })
 }
 
-async fn received_response_input_images(server: &wiremock::MockServer) -> Result<Vec<Value>> {
+async fn received_response_request_bodies(server: &wiremock::MockServer) -> Result<Vec<Value>> {
     let requests = server
         .received_requests()
         .await
         .context("failed to fetch received requests")?;
-    let mut input_images = Vec::new();
+    let mut response_request_bodies = Vec::new();
 
     for request in requests {
         if !request.url.path().ends_with("/responses") {
@@ -180,27 +208,48 @@ async fn received_response_input_images(server: &wiremock::MockServer) -> Result
         let body = request
             .body_json::<Value>()
             .context("request body should be JSON")?;
-        let Some(input) = body.get("input").and_then(Value::as_array) else {
-            continue;
-        };
-
-        for item in input {
-            if item.get("type").and_then(Value::as_str) != Some("message") {
-                continue;
-            }
-            let Some(content) = item.get("content").and_then(Value::as_array) else {
-                continue;
-            };
-            input_images.extend(
-                content
-                    .iter()
-                    .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_image"))
-                    .cloned(),
-            );
-        }
+        response_request_bodies.push(body);
     }
 
-    Ok(input_images)
+    Ok(response_request_bodies)
+}
+
+fn input_images_from_response_request(body: &Value) -> Vec<Value> {
+    let Some(input) = body.get("input").and_then(Value::as_array) else {
+        return Vec::new();
+    };
+
+    input
+        .iter()
+        .filter(|item| item.get("type").and_then(Value::as_str) == Some("message"))
+        .filter_map(|item| item.get("content").and_then(Value::as_array))
+        .flat_map(|content| {
+            content
+                .iter()
+                .filter(|span| span.get("type").and_then(Value::as_str) == Some("input_image"))
+                .cloned()
+        })
+        .collect()
+}
+
+fn large_png_bytes() -> Result<Vec<u8>> {
+    let image = ImageBuffer::from_pixel(4096, 64, Rgba([10u8, 20, 30, 255]));
+    let mut encoded = Cursor::new(Vec::new());
+    DynamicImage::ImageRgba8(image).write_to(&mut encoded, ImageFormat::Png)?;
+    Ok(encoded.into_inner())
+}
+
+fn input_image_dimensions(input_image: &Value) -> Result<(u32, u32)> {
+    let image_url = input_image
+        .get("image_url")
+        .and_then(Value::as_str)
+        .context("input image should have image_url")?;
+    let (_, encoded) = image_url
+        .split_once(',')
+        .context("input image should be a data URL")?;
+    let bytes = BASE64_STANDARD.decode(encoded)?;
+    let decoded = image::load_from_memory(&bytes)?;
+    Ok(decoded.dimensions())
 }
 
 #[tokio::test]
@@ -1803,6 +1852,60 @@ async fn turn_start_forwards_custom_local_image_detail() -> Result<()> {
         input_images[0].get("detail").and_then(Value::as_str),
         Some("original")
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_start_responses_codex_strict_mode_resizes_high_local_image_and_sets_metadata()
+-> Result<()> {
+    let result = run_local_image_turn_with_options(
+        Some(ImageDetail::High),
+        large_png_bytes()?,
+        &BTreeMap::from([(Feature::ResponsesApiCodexStrictMode, true)]),
+    )
+    .await?;
+
+    assert_eq!(result.input_images.len(), 1);
+    assert_eq!(
+        result.input_images[0].get("detail").and_then(Value::as_str),
+        Some("high")
+    );
+    let (width, height) = input_image_dimensions(&result.input_images[0])?;
+    assert_eq!(width, 2048);
+    assert_eq!(height, 32);
+
+    let image_request = result
+        .response_request_bodies
+        .iter()
+        .find(|body| !input_images_from_response_request(body).is_empty())
+        .context("expected request containing an input image")?;
+    assert_eq!(
+        image_request
+            .get("client_metadata")
+            .and_then(|metadata| metadata.get("RESPONSES_API_CODEX_STRICT_MODE"))
+            .and_then(Value::as_str),
+        Some("true")
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_start_responses_codex_strict_mode_treats_auto_as_original() -> Result<()> {
+    let result = run_local_image_turn_with_options(
+        Some(ImageDetail::Auto),
+        large_png_bytes()?,
+        &BTreeMap::from([(Feature::ResponsesApiCodexStrictMode, true)]),
+    )
+    .await?;
+
+    assert_eq!(result.input_images.len(), 1);
+    assert_eq!(
+        result.input_images[0].get("detail").and_then(Value::as_str),
+        Some("auto")
+    );
+    assert_eq!(input_image_dimensions(&result.input_images[0])?, (4096, 64));
 
     Ok(())
 }

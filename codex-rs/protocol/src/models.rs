@@ -4,6 +4,7 @@ use std::num::NonZeroUsize;
 use std::path::Path;
 
 use codex_utils_image::PromptImageMode;
+use codex_utils_image::load_data_url_for_prompt;
 use codex_utils_image::load_for_prompt_bytes;
 use serde::Deserialize;
 use serde::Deserializer;
@@ -1082,6 +1083,22 @@ pub fn local_image_content_items_with_label_number(
         ImageDetail::Auto | ImageDetail::Low | ImageDetail::High => PromptImageMode::ResizeToFit,
     };
 
+    local_image_content_items_with_label_number_and_mode(
+        path,
+        file_bytes,
+        label_number,
+        detail,
+        mode,
+    )
+}
+
+fn local_image_content_items_with_label_number_and_mode(
+    path: &std::path::Path,
+    file_bytes: Vec<u8>,
+    label_number: Option<usize>,
+    detail: ImageDetail,
+    mode: PromptImageMode,
+) -> Vec<ContentItem> {
     match load_for_prompt_bytes(path, file_bytes, mode) {
         Ok(image) => {
             let mut items = Vec::with_capacity(3);
@@ -1114,7 +1131,175 @@ pub fn local_image_content_items_with_label_number(
             ImageProcessingError::UnsupportedImageFormat { mime } => {
                 vec![unsupported_image_error_placeholder(path, mime)]
             }
+            ImageProcessingError::InvalidDataUrl { .. } => {
+                vec![local_image_error_placeholder(path, &err)]
+            }
         },
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResponsesCodexStrictModeImagePreparationError {
+    #[error(
+        "Responses Codex strict mode only supports data URL images; got image_url={image_url_preview:?}"
+    )]
+    NonDataUrl { image_url_preview: String },
+    #[error(
+        "Responses Codex strict mode image detail only supports `original`, `high`, or `auto`; got `low`"
+    )]
+    UnsupportedLowDetail,
+    #[error("Responses Codex strict mode failed to prepare image: {0}")]
+    ImageProcessing(#[from] ImageProcessingError),
+}
+
+pub fn response_input_item_from_user_input_with_responses_codex_strict_mode(
+    items: Vec<UserInput>,
+) -> ResponseInputItem {
+    response_input_item_from_user_input(items, /*responses_codex_strict_mode*/ true)
+}
+
+fn response_input_item_from_user_input(
+    items: Vec<UserInput>,
+    responses_codex_strict_mode: bool,
+) -> ResponseInputItem {
+    let mut image_index = 0;
+    ResponseInputItem::Message {
+        role: "user".to_string(),
+        content: items
+            .into_iter()
+            .flat_map(|c| match c {
+                UserInput::Text { text, .. } => vec![ContentItem::InputText { text }],
+                UserInput::Image {
+                    image_url, detail, ..
+                } => {
+                    image_index += 1;
+                    let detail = detail.unwrap_or(DEFAULT_IMAGE_DETAIL);
+                    vec![ContentItem::InputImage {
+                        image_url,
+                        detail: Some(detail),
+                    }]
+                }
+                UserInput::LocalImage { path, detail, .. } => {
+                    image_index += 1;
+                    let detail = detail.unwrap_or(DEFAULT_IMAGE_DETAIL);
+                    let mode = if responses_codex_strict_mode {
+                        prompt_image_mode_for_responses_codex_strict_detail(detail)
+                            .unwrap_or(PromptImageMode::ResizeToFit)
+                    } else {
+                        match detail {
+                            ImageDetail::Original => PromptImageMode::Original,
+                            ImageDetail::Auto | ImageDetail::Low | ImageDetail::High => {
+                                PromptImageMode::ResizeToFit
+                            }
+                        }
+                    };
+                    match std::fs::read(&path) {
+                        Ok(file_bytes) => local_image_content_items_with_label_number_and_mode(
+                            &path,
+                            file_bytes,
+                            Some(image_index),
+                            detail,
+                            mode,
+                        ),
+                        Err(err) => vec![local_image_error_placeholder(&path, err)],
+                    }
+                }
+                UserInput::Skill { .. } | UserInput::Mention { .. } => Vec::new(), // Tool bodies are injected later in core
+            })
+            .collect::<Vec<ContentItem>>(),
+        phase: None,
+    }
+}
+
+pub fn prepare_response_items_for_responses_codex_strict_mode(
+    items: &mut [ResponseItem],
+) -> Result<(), ResponsesCodexStrictModeImagePreparationError> {
+    for item in items {
+        prepare_response_item_for_responses_codex_strict_mode(item)?;
+    }
+    Ok(())
+}
+
+fn prepare_response_item_for_responses_codex_strict_mode(
+    item: &mut ResponseItem,
+) -> Result<(), ResponsesCodexStrictModeImagePreparationError> {
+    match item {
+        ResponseItem::Message { content, .. } => {
+            prepare_content_items_for_responses_codex_strict_mode(content)
+        }
+        ResponseItem::FunctionCallOutput { output, .. }
+        | ResponseItem::CustomToolCallOutput { output, .. } => {
+            if let Some(content_items) = output.content_items_mut() {
+                prepare_function_call_output_content_items_for_responses_codex_strict_mode(
+                    content_items,
+                )?;
+            }
+            Ok(())
+        }
+        ResponseItem::Reasoning { .. }
+        | ResponseItem::LocalShellCall { .. }
+        | ResponseItem::FunctionCall { .. }
+        | ResponseItem::ToolSearchCall { .. }
+        | ResponseItem::CustomToolCall { .. }
+        | ResponseItem::ToolSearchOutput { .. }
+        | ResponseItem::WebSearchCall { .. }
+        | ResponseItem::ImageGenerationCall { .. }
+        | ResponseItem::Compaction { .. }
+        | ResponseItem::CompactionTrigger
+        | ResponseItem::ContextCompaction { .. }
+        | ResponseItem::Other => Ok(()),
+    }
+}
+
+fn prepare_content_items_for_responses_codex_strict_mode(
+    items: &mut [ContentItem],
+) -> Result<(), ResponsesCodexStrictModeImagePreparationError> {
+    for item in items {
+        if let ContentItem::InputImage { image_url, detail } = item {
+            prepare_image_url_for_responses_codex_strict_mode(image_url, *detail)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_function_call_output_content_items_for_responses_codex_strict_mode(
+    items: &mut [FunctionCallOutputContentItem],
+) -> Result<(), ResponsesCodexStrictModeImagePreparationError> {
+    for item in items {
+        if let FunctionCallOutputContentItem::InputImage { image_url, detail } = item {
+            prepare_image_url_for_responses_codex_strict_mode(image_url, *detail)?;
+        }
+    }
+    Ok(())
+}
+
+fn prepare_image_url_for_responses_codex_strict_mode(
+    image_url: &mut String,
+    detail: Option<ImageDetail>,
+) -> Result<(), ResponsesCodexStrictModeImagePreparationError> {
+    if !image_url.starts_with("data:") {
+        return Err(ResponsesCodexStrictModeImagePreparationError::NonDataUrl {
+            image_url_preview: image_url.chars().take(128).collect(),
+        });
+    }
+
+    let mode = prompt_image_mode_for_responses_codex_strict_detail(
+        detail.unwrap_or(DEFAULT_IMAGE_DETAIL),
+    )?;
+    let image = load_data_url_for_prompt(image_url, mode)?;
+    *image_url = image.into_data_url();
+    Ok(())
+}
+
+fn prompt_image_mode_for_responses_codex_strict_detail(
+    detail: ImageDetail,
+) -> Result<PromptImageMode, ResponsesCodexStrictModeImagePreparationError> {
+    match detail {
+        ImageDetail::Auto | ImageDetail::Original => Ok(PromptImageMode::Original),
+        ImageDetail::High => Ok(PromptImageMode::ResizeToFit),
+        ImageDetail::Low => {
+            Err(ResponsesCodexStrictModeImagePreparationError::UnsupportedLowDetail)
+        }
     }
 }
 
@@ -1230,41 +1415,7 @@ pub enum ReasoningItemContent {
 
 impl From<Vec<UserInput>> for ResponseInputItem {
     fn from(items: Vec<UserInput>) -> Self {
-        let mut image_index = 0;
-        Self::Message {
-            role: "user".to_string(),
-            content: items
-                .into_iter()
-                .flat_map(|c| match c {
-                    UserInput::Text { text, .. } => vec![ContentItem::InputText { text }],
-                    UserInput::Image {
-                        image_url, detail, ..
-                    } => {
-                        image_index += 1;
-                        let detail = detail.unwrap_or(DEFAULT_IMAGE_DETAIL);
-                        vec![ContentItem::InputImage {
-                            image_url,
-                            detail: Some(detail),
-                        }]
-                    }
-                    UserInput::LocalImage { path, detail, .. } => {
-                        image_index += 1;
-                        let detail = detail.unwrap_or(DEFAULT_IMAGE_DETAIL);
-                        match std::fs::read(&path) {
-                            Ok(file_bytes) => local_image_content_items_with_label_number(
-                                &path,
-                                file_bytes,
-                                Some(image_index),
-                                detail,
-                            ),
-                            Err(err) => vec![local_image_error_placeholder(&path, err)],
-                        }
-                    }
-                    UserInput::Skill { .. } | UserInput::Mention { .. } => Vec::new(), // Tool bodies are injected later in core
-                })
-                .collect::<Vec<ContentItem>>(),
-            phase: None,
-        }
+        response_input_item_from_user_input(items, /*responses_codex_strict_mode*/ false)
     }
 }
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq, JsonSchema, TS)]
@@ -1645,6 +1796,7 @@ mod tests {
     use super::*;
     use anyhow::Result;
     use codex_execpolicy::Policy;
+    use codex_utils_image::EncodedImage;
     use pretty_assertions::assert_eq;
     use std::path::PathBuf;
     use tempfile::tempdir;
@@ -1656,6 +1808,16 @@ mod tests {
         0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 11, 73, 68, 65, 84, 120, 156, 99, 96, 0, 2, 0, 0, 5, 0,
         1, 122, 94, 171, 63, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
     ];
+
+    fn tiny_png_data_url() -> String {
+        EncodedImage {
+            bytes: TINY_PNG_BYTES.to_vec(),
+            mime: "image/png".to_string(),
+            width: 1,
+            height: 1,
+        }
+        .into_data_url()
+    }
 
     #[test]
     fn response_input_message_conversion_preserves_phase() {
@@ -1706,6 +1868,76 @@ mod tests {
                 detail: Some(ImageDetail::Auto),
             }
         );
+
+        Ok(())
+    }
+
+    #[test]
+    fn responses_codex_strict_mode_rejects_low_image_detail() {
+        let mut items = vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: tiny_png_data_url(),
+                detail: Some(ImageDetail::Low),
+            }],
+            phase: None,
+        }];
+
+        let err = prepare_response_items_for_responses_codex_strict_mode(&mut items)
+            .expect_err("low detail should be rejected in strict mode");
+
+        assert!(matches!(
+            err,
+            ResponsesCodexStrictModeImagePreparationError::UnsupportedLowDetail
+        ));
+    }
+
+    #[test]
+    fn responses_codex_strict_mode_rejects_non_data_url_image() {
+        let mut items = vec![ResponseItem::Message {
+            id: None,
+            role: "user".to_string(),
+            content: vec![ContentItem::InputImage {
+                image_url: "https://example.com/image.png".to_string(),
+                detail: Some(ImageDetail::High),
+            }],
+            phase: None,
+        }];
+
+        let err = prepare_response_items_for_responses_codex_strict_mode(&mut items)
+            .expect_err("HTTP image URLs should be rejected in strict mode");
+
+        assert!(matches!(
+            err,
+            ResponsesCodexStrictModeImagePreparationError::NonDataUrl { .. }
+        ));
+    }
+
+    #[test]
+    fn responses_codex_strict_mode_prepares_tool_output_images() -> Result<()> {
+        let mut items = vec![ResponseItem::FunctionCallOutput {
+            call_id: "call1".to_string(),
+            output: FunctionCallOutputPayload::from_content_items(vec![
+                FunctionCallOutputContentItem::InputImage {
+                    image_url: tiny_png_data_url(),
+                    detail: Some(ImageDetail::High),
+                },
+            ]),
+        }];
+
+        prepare_response_items_for_responses_codex_strict_mode(&mut items)?;
+
+        let ResponseItem::FunctionCallOutput { output, .. } = &items[0] else {
+            panic!("expected function call output")
+        };
+        let [FunctionCallOutputContentItem::InputImage { image_url, detail }] =
+            output.content_items().expect("content items")
+        else {
+            panic!("expected one image")
+        };
+        assert!(image_url.starts_with("data:image/png;base64,"));
+        assert_eq!(*detail, Some(ImageDetail::High));
 
         Ok(())
     }

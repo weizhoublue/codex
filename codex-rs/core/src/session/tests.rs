@@ -437,6 +437,7 @@ fn test_model_client_session() -> crate::client::ModelClientSession {
         /*model_verbosity*/ None,
         /*enable_request_compression*/ false,
         /*include_timing_metrics*/ false,
+        /*responses_api_codex_strict_mode_enabled*/ false,
         /*beta_features_header*/ None,
         /*attestation_provider*/ None,
     )
@@ -4688,6 +4689,9 @@ pub(crate) async fn make_session_and_context() -> (Session, TurnContext) {
             config.model_verbosity,
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
+            config
+                .features
+                .enabled(Feature::ResponsesApiCodexStrictMode),
             Session::build_model_client_beta_features_header(config.as_ref()),
             /*attestation_provider*/ None,
         ),
@@ -6536,6 +6540,9 @@ where
             config.model_verbosity,
             config.features.enabled(Feature::EnableRequestCompression),
             config.features.enabled(Feature::RuntimeMetrics),
+            config
+                .features
+                .enabled(Feature::ResponsesApiCodexStrictMode),
             Session::build_model_client_beta_features_header(config.as_ref()),
             /*attestation_provider*/ None,
         ),
