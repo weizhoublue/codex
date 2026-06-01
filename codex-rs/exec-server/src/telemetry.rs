@@ -6,20 +6,45 @@ use std::time::Duration;
 use codex_otel::MetricsClient;
 use tracing::warn;
 
-const CONNECTIONS_ACTIVE_METRIC: &str = "exec_server.connections.active";
-const CONNECTIONS_TOTAL_METRIC: &str = "exec_server.connections.total";
-const REMOTE_REGISTRATION_TOTAL_METRIC: &str = "exec_server.remote.registration.total";
-const REMOTE_REGISTRATION_DURATION_METRIC: &str = "exec_server.remote.registration.duration";
-const REMOTE_WEBSOCKET_ACTIVE_METRIC: &str = "exec_server.remote.websocket.active";
-const REMOTE_WEBSOCKET_CONNECT_TOTAL_METRIC: &str = "exec_server.remote.websocket.connect.total";
+const CONNECTIONS_ACTIVE_METRIC: &str = "exec_server_connections_active";
+const CONNECTIONS_ACTIVE_DESCRIPTION: &str = "Number of active exec-server connections.";
+const CONNECTIONS_TOTAL_METRIC: &str = "exec_server_connections_total";
+const CONNECTIONS_TOTAL_DESCRIPTION: &str = "Total number of accepted exec-server connections.";
+const REMOTE_REGISTRATION_TOTAL_METRIC: &str = "exec_server_remote_registration_total";
+const REMOTE_REGISTRATION_TOTAL_DESCRIPTION: &str =
+    "Total number of remote exec-server registration attempts.";
+const REMOTE_REGISTRATION_DURATION_METRIC: &str =
+    "exec_server_remote_registration_duration_seconds";
+const REMOTE_REGISTRATION_DURATION_DESCRIPTION: &str =
+    "Duration of remote exec-server registration attempts in seconds.";
+const REMOTE_WEBSOCKET_ACTIVE_METRIC: &str = "exec_server_remote_websocket_active";
+const REMOTE_WEBSOCKET_ACTIVE_DESCRIPTION: &str =
+    "Number of active remote exec-server WebSocket connections.";
+const REMOTE_WEBSOCKET_CONNECT_TOTAL_METRIC: &str = "exec_server_remote_websocket_connect_total";
+const REMOTE_WEBSOCKET_CONNECT_TOTAL_DESCRIPTION: &str =
+    "Total number of remote exec-server WebSocket connection attempts.";
 const REMOTE_WEBSOCKET_CONNECT_DURATION_METRIC: &str =
-    "exec_server.remote.websocket.connect.duration";
-const REMOTE_WEBSOCKET_RECONNECTS_METRIC: &str = "exec_server.remote.websocket.reconnects";
-const REQUESTS_TOTAL_METRIC: &str = "exec_server.requests.total";
-const REQUEST_DURATION_METRIC: &str = "exec_server.request.duration";
-const PROCESSES_ACTIVE_METRIC: &str = "exec_server.processes.active";
-const PROCESSES_FINISHED_TOTAL_METRIC: &str = "exec_server.processes.finished_total";
-const PROCESS_DURATION_METRIC: &str = "exec_server.process.duration";
+    "exec_server_remote_websocket_connect_duration_seconds";
+const REMOTE_WEBSOCKET_CONNECT_DURATION_DESCRIPTION: &str =
+    "Duration of remote exec-server WebSocket connection attempts in seconds.";
+const REMOTE_WEBSOCKET_RECONNECTS_METRIC: &str = "exec_server_remote_websocket_reconnects_total";
+const REMOTE_WEBSOCKET_RECONNECTS_DESCRIPTION: &str =
+    "Total number of remote exec-server WebSocket reconnects.";
+const REQUESTS_TOTAL_METRIC: &str = "exec_server_requests_total";
+const REQUESTS_TOTAL_DESCRIPTION: &str = "Total number of exec-server requests.";
+const REQUEST_DURATION_METRIC: &str = "exec_server_request_duration_seconds";
+const REQUEST_DURATION_DESCRIPTION: &str = "Duration of exec-server requests in seconds.";
+const PROCESSES_ACTIVE_METRIC: &str = "exec_server_processes_active";
+const PROCESSES_ACTIVE_DESCRIPTION: &str = "Number of active exec-server processes.";
+const PROCESSES_FINISHED_TOTAL_METRIC: &str = "exec_server_processes_finished_total";
+const PROCESSES_FINISHED_TOTAL_DESCRIPTION: &str =
+    "Total number of finished exec-server processes.";
+const PROCESS_DURATION_METRIC: &str = "exec_server_process_duration_seconds";
+const PROCESS_DURATION_DESCRIPTION: &str = "Duration of exec-server processes in seconds.";
+
+pub fn runtime_span() -> tracing::Span {
+    tracing::info_span!("codex.exec_server", otel.kind = "internal")
+}
 
 #[derive(Clone, Copy)]
 pub(crate) enum ConnectionTransport {
@@ -88,11 +113,13 @@ impl ExecServerTelemetry {
                 + 1;
             inner.gauge(
                 CONNECTIONS_ACTIVE_METRIC,
+                CONNECTIONS_ACTIVE_DESCRIPTION,
                 active,
                 &[("transport", transport.metric_tag())],
             );
             inner.counter(
                 CONNECTIONS_TOTAL_METRIC,
+                CONNECTIONS_TOTAL_DESCRIPTION,
                 &[
                     ("transport", transport.metric_tag()),
                     ("result", "accepted"),
@@ -108,15 +135,29 @@ impl ExecServerTelemetry {
     pub(crate) fn remote_registration_completed(&self, result: &'static str, duration: Duration) {
         self.with_inner(|inner| {
             let tags = [("result", result)];
-            inner.counter(REMOTE_REGISTRATION_TOTAL_METRIC, &tags);
-            inner.duration(REMOTE_REGISTRATION_DURATION_METRIC, duration, &tags);
+            inner.counter(
+                REMOTE_REGISTRATION_TOTAL_METRIC,
+                REMOTE_REGISTRATION_TOTAL_DESCRIPTION,
+                &tags,
+            );
+            inner.duration(
+                REMOTE_REGISTRATION_DURATION_METRIC,
+                REMOTE_REGISTRATION_DURATION_DESCRIPTION,
+                duration,
+                &tags,
+            );
         });
     }
 
     pub(crate) fn remote_websocket_connected(&self) -> RemoteWebSocketMetricGuard {
         self.with_inner(|inner| {
             let active = inner.remote_websockets.fetch_add(1, Ordering::AcqRel) + 1;
-            inner.gauge(REMOTE_WEBSOCKET_ACTIVE_METRIC, active, &[]);
+            inner.gauge(
+                REMOTE_WEBSOCKET_ACTIVE_METRIC,
+                REMOTE_WEBSOCKET_ACTIVE_DESCRIPTION,
+                active,
+                &[],
+            );
         });
         RemoteWebSocketMetricGuard {
             telemetry: self.clone(),
@@ -130,8 +171,17 @@ impl ExecServerTelemetry {
     ) {
         self.with_inner(|inner| {
             let tags = [("result", result)];
-            inner.counter(REMOTE_WEBSOCKET_CONNECT_TOTAL_METRIC, &tags);
-            inner.duration(REMOTE_WEBSOCKET_CONNECT_DURATION_METRIC, duration, &tags);
+            inner.counter(
+                REMOTE_WEBSOCKET_CONNECT_TOTAL_METRIC,
+                REMOTE_WEBSOCKET_CONNECT_TOTAL_DESCRIPTION,
+                &tags,
+            );
+            inner.duration(
+                REMOTE_WEBSOCKET_CONNECT_DURATION_METRIC,
+                REMOTE_WEBSOCKET_CONNECT_DURATION_DESCRIPTION,
+                duration,
+                &tags,
+            );
         });
     }
 
@@ -143,30 +193,58 @@ impl ExecServerTelemetry {
     ) {
         self.with_inner(|inner| {
             let tags = [("method", method), ("result", result)];
-            inner.counter(REQUESTS_TOTAL_METRIC, &tags);
-            inner.duration(REQUEST_DURATION_METRIC, duration, &tags);
+            inner.counter(REQUESTS_TOTAL_METRIC, REQUESTS_TOTAL_DESCRIPTION, &tags);
+            inner.duration(
+                REQUEST_DURATION_METRIC,
+                REQUEST_DURATION_DESCRIPTION,
+                duration,
+                &tags,
+            );
         });
     }
 
     pub(crate) fn process_started(&self) {
         self.with_inner(|inner| {
             let active = inner.active_processes.fetch_add(1, Ordering::AcqRel) + 1;
-            inner.gauge(PROCESSES_ACTIVE_METRIC, active, &[]);
+            inner.gauge(
+                PROCESSES_ACTIVE_METRIC,
+                PROCESSES_ACTIVE_DESCRIPTION,
+                active,
+                &[],
+            );
         });
     }
 
     pub(crate) fn process_finished(&self, result: &'static str, duration: Duration) {
         self.with_inner(|inner| {
             let active = inner.active_processes.fetch_sub(1, Ordering::AcqRel) - 1;
-            inner.gauge(PROCESSES_ACTIVE_METRIC, active, &[]);
-            inner.counter(PROCESSES_FINISHED_TOTAL_METRIC, &[("result", result)]);
-            inner.duration(PROCESS_DURATION_METRIC, duration, &[("result", result)]);
+            inner.gauge(
+                PROCESSES_ACTIVE_METRIC,
+                PROCESSES_ACTIVE_DESCRIPTION,
+                active,
+                &[],
+            );
+            inner.counter(
+                PROCESSES_FINISHED_TOTAL_METRIC,
+                PROCESSES_FINISHED_TOTAL_DESCRIPTION,
+                &[("result", result)],
+            );
+            inner.duration(
+                PROCESS_DURATION_METRIC,
+                PROCESS_DURATION_DESCRIPTION,
+                duration,
+                &[("result", result)],
+            );
         });
     }
 
     pub(crate) fn remote_websocket_reconnect(&self, reason: &'static str) {
         self.with_inner(|inner| {
-            inner.counter(REMOTE_WEBSOCKET_RECONNECTS_METRIC, &[("reason", reason)]);
+            inner.counter(
+                REMOTE_WEBSOCKET_RECONNECTS_METRIC,
+                REMOTE_WEBSOCKET_RECONNECTS_DESCRIPTION,
+                &[("reason", reason)],
+            );
         });
     }
 
@@ -178,6 +256,7 @@ impl ExecServerTelemetry {
                 - 1;
             inner.gauge(
                 CONNECTIONS_ACTIVE_METRIC,
+                CONNECTIONS_ACTIVE_DESCRIPTION,
                 active,
                 &[("transport", transport.metric_tag())],
             );
@@ -187,7 +266,12 @@ impl ExecServerTelemetry {
     fn remote_websocket_disconnected(&self) {
         self.with_inner(|inner| {
             let active = inner.remote_websockets.fetch_sub(1, Ordering::AcqRel) - 1;
-            inner.gauge(REMOTE_WEBSOCKET_ACTIVE_METRIC, active, &[]);
+            inner.gauge(
+                REMOTE_WEBSOCKET_ACTIVE_METRIC,
+                REMOTE_WEBSOCKET_ACTIVE_DESCRIPTION,
+                active,
+                &[],
+            );
         });
     }
 
@@ -219,20 +303,32 @@ impl ExecServerTelemetryInner {
         }
     }
 
-    fn counter(&self, name: &str, tags: &[(&str, &str)]) {
-        if self.metrics.counter(name, /*inc*/ 1, tags).is_err() {
+    fn counter(&self, name: &str, description: &str, tags: &[(&str, &str)]) {
+        if self
+            .metrics
+            .counter_with_description(name, description, /*inc*/ 1, tags)
+            .is_err()
+        {
             warn!(metric = name, "failed to emit exec-server counter");
         }
     }
 
-    fn duration(&self, name: &str, duration: Duration, tags: &[(&str, &str)]) {
-        if self.metrics.record_duration(name, duration, tags).is_err() {
+    fn duration(&self, name: &str, description: &str, duration: Duration, tags: &[(&str, &str)]) {
+        if self
+            .metrics
+            .record_duration_seconds_with_description(name, description, duration, tags)
+            .is_err()
+        {
             warn!(metric = name, "failed to emit exec-server duration");
         }
     }
 
-    fn gauge(&self, name: &str, value: i64, tags: &[(&str, &str)]) {
-        if self.metrics.gauge(name, value, tags).is_err() {
+    fn gauge(&self, name: &str, description: &str, value: i64, tags: &[(&str, &str)]) {
+        if self
+            .metrics
+            .gauge_with_description(name, description, value, tags)
+            .is_err()
+        {
             warn!(metric = name, "failed to emit exec-server gauge");
         }
     }
@@ -252,8 +348,7 @@ mod tests {
     use opentelemetry_sdk::metrics::data::ResourceMetrics;
     use pretty_assertions::assert_eq;
 
-    use super::ConnectionTransport;
-    use super::ExecServerTelemetry;
+    use super::*;
 
     #[test]
     fn emits_bounded_exec_server_metrics() {
@@ -281,7 +376,7 @@ mod tests {
 
         let metrics = latest_metrics(&exporter);
         assert_eq!(
-            metric_points(&metrics, "exec_server.connections.total"),
+            metric_points(&metrics, "exec_server_connections_total"),
             vec![(
                 1.0,
                 BTreeMap::from([
@@ -291,32 +386,32 @@ mod tests {
             )]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.connections.active"),
+            metric_points(&metrics, "exec_server_connections_active"),
             vec![(
                 0.0,
                 BTreeMap::from([("transport".to_string(), "websocket".to_string())]),
             )]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.remote.registration.total"),
+            metric_points(&metrics, "exec_server_remote_registration_total"),
             vec![(
                 1.0,
                 BTreeMap::from([("result".to_string(), "success".to_string())]),
             )]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.remote.websocket.connect.total"),
+            metric_points(&metrics, "exec_server_remote_websocket_connect_total"),
             vec![(
                 1.0,
                 BTreeMap::from([("result".to_string(), "success".to_string())]),
             )]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.remote.websocket.active"),
+            metric_points(&metrics, "exec_server_remote_websocket_active"),
             vec![(0.0, BTreeMap::new())]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.requests.total"),
+            metric_points(&metrics, "exec_server_requests_total"),
             vec![(
                 1.0,
                 BTreeMap::from([
@@ -326,33 +421,111 @@ mod tests {
             )]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.processes.active"),
+            metric_points(&metrics, "exec_server_processes_active"),
             vec![(0.0, BTreeMap::new())]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.processes.finished_total"),
+            metric_points(&metrics, "exec_server_processes_finished_total"),
             vec![(
                 1.0,
                 BTreeMap::from([("result".to_string(), "success".to_string())]),
             )]
         );
         assert_eq!(
-            metric_points(&metrics, "exec_server.remote.websocket.reconnects"),
+            metric_points(&metrics, "exec_server_remote_websocket_reconnects_total"),
             vec![(
                 1.0,
                 BTreeMap::from([("reason".to_string(), "connect_failed".to_string())]),
             )]
         );
         assert_eq!(
-            histogram_count(&metrics, "exec_server.remote.registration.duration"),
+            histogram_count(&metrics, "exec_server_remote_registration_duration_seconds"),
             1
         );
         assert_eq!(
-            histogram_count(&metrics, "exec_server.remote.websocket.connect.duration"),
+            histogram_count(
+                &metrics,
+                "exec_server_remote_websocket_connect_duration_seconds"
+            ),
             1
         );
-        assert_eq!(histogram_count(&metrics, "exec_server.request.duration"), 1);
-        assert_eq!(histogram_count(&metrics, "exec_server.process.duration"), 1);
+        assert_eq!(
+            histogram_count(&metrics, "exec_server_request_duration_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_count(&metrics, "exec_server_process_duration_seconds"),
+            1
+        );
+        assert_eq!(
+            histogram_sum(&metrics, "exec_server_request_duration_seconds"),
+            0.012
+        );
+        for (name, description, unit) in [
+            (
+                "exec_server_connections_active",
+                CONNECTIONS_ACTIVE_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_connections_total",
+                CONNECTIONS_TOTAL_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_remote_registration_total",
+                REMOTE_REGISTRATION_TOTAL_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_remote_registration_duration_seconds",
+                REMOTE_REGISTRATION_DURATION_DESCRIPTION,
+                "s",
+            ),
+            (
+                "exec_server_remote_websocket_active",
+                REMOTE_WEBSOCKET_ACTIVE_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_remote_websocket_connect_total",
+                REMOTE_WEBSOCKET_CONNECT_TOTAL_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_remote_websocket_connect_duration_seconds",
+                REMOTE_WEBSOCKET_CONNECT_DURATION_DESCRIPTION,
+                "s",
+            ),
+            (
+                "exec_server_remote_websocket_reconnects_total",
+                REMOTE_WEBSOCKET_RECONNECTS_DESCRIPTION,
+                "",
+            ),
+            ("exec_server_requests_total", REQUESTS_TOTAL_DESCRIPTION, ""),
+            (
+                "exec_server_request_duration_seconds",
+                REQUEST_DURATION_DESCRIPTION,
+                "s",
+            ),
+            (
+                "exec_server_processes_active",
+                PROCESSES_ACTIVE_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_processes_finished_total",
+                PROCESSES_FINISHED_TOTAL_DESCRIPTION,
+                "",
+            ),
+            (
+                "exec_server_process_duration_seconds",
+                PROCESS_DURATION_DESCRIPTION,
+                "s",
+            ),
+        ] {
+            assert_metric_metadata(&metrics, name, description, unit);
+        }
     }
 
     fn latest_metrics(exporter: &InMemoryMetricExporter) -> ResourceMetrics {
@@ -397,6 +570,27 @@ mod tests {
                 .sum(),
             _ => panic!("unexpected histogram data for {name}"),
         }
+    }
+
+    fn histogram_sum(resource_metrics: &ResourceMetrics, name: &str) -> f64 {
+        match find_metric(resource_metrics, name).data() {
+            AggregatedMetrics::F64(MetricData::Histogram(histogram)) => histogram
+                .data_points()
+                .map(opentelemetry_sdk::metrics::data::HistogramDataPoint::sum)
+                .sum(),
+            _ => panic!("unexpected histogram data for {name}"),
+        }
+    }
+
+    fn assert_metric_metadata(
+        resource_metrics: &ResourceMetrics,
+        name: &str,
+        description: &str,
+        unit: &str,
+    ) {
+        let metric = find_metric(resource_metrics, name);
+        assert_eq!(metric.description(), description);
+        assert_eq!(metric.unit(), unit);
     }
 
     fn attributes_to_map<'a>(

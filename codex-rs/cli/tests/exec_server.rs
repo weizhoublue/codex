@@ -60,6 +60,7 @@ fn local_exec_server_ignores_invalid_config_without_strict_config() -> Result<()
 fn local_exec_server_exports_real_otel_metrics() -> Result<()> {
     let collector = TestCollector::start()?;
     let codex_home = TempDir::new()?;
+    let base_url = &collector.base_url;
     std::fs::write(
         codex_home.path().join("config.toml"),
         format!(
@@ -69,9 +70,8 @@ enabled = true
 
 [otel]
 environment = "test"
-metrics_exporter = {{ otlp-http = {{ endpoint = "{}/v1/metrics", protocol = "json" }} }}
-"#,
-            collector.base_url
+metrics_exporter = {{ otlp-http = {{ endpoint = "{base_url}/v1/metrics", protocol = "json" }} }}
+"#
         ),
     )?;
 
@@ -91,16 +91,15 @@ metrics_exporter = {{ otlp-http = {{ endpoint = "{}/v1/metrics", protocol = "jso
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
-        metrics.contains("exec_server.connections.active"),
+        metrics.contains("exec_server_connections_active"),
         "{metrics}"
     );
-    assert!(metrics.contains("exec_server.requests.total"), "{metrics}");
+    assert!(metrics.contains("exec_server_requests_total"), "{metrics}");
     assert!(metrics.contains("initialize"), "{metrics}");
     assert!(
         metrics.contains("success") || metrics.contains("disconnected"),
         "{metrics}"
     );
-
     Ok(())
 }
 

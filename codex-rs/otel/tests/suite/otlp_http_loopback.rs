@@ -186,8 +186,9 @@ fn otlp_http_exporter_sends_metrics_to_collector() -> Result<()> {
     ))?;
 
     metrics.counter("codex.turns", /*inc*/ 1, &[("source", "test")])?;
-    metrics.gauge(
-        "exec_server.connections.active",
+    metrics.gauge_with_description(
+        "exec_server_connections_active",
+        "Number of active exec-server connections.",
         /*value*/ 1,
         &[("transport", "websocket")],
     )?;
@@ -226,7 +227,7 @@ fn otlp_http_exporter_sends_metrics_to_collector() -> Result<()> {
         &body.chars().take(2000).collect::<String>()
     );
     assert!(
-        body.contains("exec_server.connections.active"),
+        body.contains("exec_server_connections_active"),
         "expected exec-server gauge not found; body prefix: {}",
         &body.chars().take(2000).collect::<String>()
     );

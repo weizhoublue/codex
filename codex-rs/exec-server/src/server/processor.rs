@@ -271,6 +271,9 @@ mod tests {
     use codex_app_server_protocol::JSONRPCRequest;
     use codex_app_server_protocol::JSONRPCResponse;
     use codex_app_server_protocol::RequestId;
+    use opentelemetry::trace::TracerProvider as _;
+    use opentelemetry_sdk::trace::InMemorySpanExporter;
+    use opentelemetry_sdk::trace::SdkTracerProvider;
     use pretty_assertions::assert_eq;
     use serde::Serialize;
     use serde::de::DeserializeOwned;
@@ -282,8 +285,11 @@ mod tests {
     use tokio::io::duplex;
     use tokio::task::JoinHandle;
     use tokio::time::timeout;
+    use tracing_subscriber::filter::filter_fn;
+    use tracing_subscriber::prelude::*;
 
     use super::request_method;
+    use super::request_span;
     use super::run_connection;
     use crate::ExecServerRuntimePaths;
     use crate::ProcessId;
@@ -301,11 +307,53 @@ mod tests {
     use crate::protocol::TerminateParams;
     use crate::protocol::TerminateResponse;
     use crate::server::session_registry::SessionRegistry;
+    use crate::telemetry::runtime_span;
 
     #[test]
     fn request_method_uses_bounded_protocol_method_names() {
         assert_eq!(request_method(EXEC_TERMINATE_METHOD), EXEC_TERMINATE_METHOD);
         assert_eq!(request_method("custom/method"), "unknown");
+    }
+
+    #[test]
+    fn runtime_and_request_spans_are_exported() {
+        let span_exporter = InMemorySpanExporter::default();
+        let tracer_provider = SdkTracerProvider::builder()
+            .with_simple_exporter(span_exporter.clone())
+            .build();
+        let tracer = tracer_provider.tracer("exec-server-test");
+        let subscriber = tracing_subscriber::registry().with(
+            tracing_opentelemetry::layer()
+                .with_tracer(tracer)
+                .with_filter(filter_fn(codex_otel::OtelProvider::trace_export_filter)),
+        );
+
+        tracing::subscriber::with_default(subscriber, || {
+            tracing::callsite::rebuild_interest_cache();
+            let runtime_span = runtime_span();
+            runtime_span.in_scope(|| {
+                let request_span = request_span(INITIALIZE_METHOD);
+                request_span.in_scope(|| {});
+                request_span.record("result", "success");
+                drop(request_span);
+            });
+            drop(runtime_span);
+        });
+
+        tracer_provider.force_flush().expect("flush traces");
+        let spans = span_exporter.get_finished_spans().expect("span export");
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.name.as_ref() == "codex.exec_server"),
+            "expected runtime span, got {spans:?}"
+        );
+        assert!(
+            spans
+                .iter()
+                .any(|span| span.name.as_ref() == INITIALIZE_METHOD),
+            "expected initialize request span, got {spans:?}"
+        );
     }
 
     #[tokio::test]

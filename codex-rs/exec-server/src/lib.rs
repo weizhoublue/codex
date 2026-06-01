@@ -108,3 +108,4 @@ pub use server::ExecServerListenUrlParseError;
 pub use server::run_main;
 pub use server::run_main_with_telemetry;
 pub use telemetry::ExecServerTelemetry;
+pub use telemetry::runtime_span;

@@ -41,6 +41,7 @@ use owo_colors::OwoColorize;
 use std::io::IsTerminal;
 use std::path::PathBuf;
 use supports_color::Stream;
+use tracing::Instrument;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::prelude::*;
 
@@ -1619,7 +1620,9 @@ async fn run_exec_server_command(
             remote_config.name = name;
         }
         let remote_config = remote_config.with_telemetry(telemetry);
-        codex_exec_server::run_remote_environment(remote_config, runtime_paths).await?;
+        codex_exec_server::run_remote_environment(remote_config, runtime_paths)
+            .instrument(codex_exec_server::runtime_span())
+            .await?;
         Ok(())
     } else {
         let config = if strict_config {
@@ -1635,6 +1638,7 @@ async fn run_exec_server_command(
             .as_deref()
             .unwrap_or(codex_exec_server::DEFAULT_LISTEN_URL);
         codex_exec_server::run_main_with_telemetry(listen_url, runtime_paths, telemetry)
+            .instrument(codex_exec_server::runtime_span())
             .await
             .map_err(anyhow::Error::from_boxed)
     }

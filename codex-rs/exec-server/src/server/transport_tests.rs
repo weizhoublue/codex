@@ -179,10 +179,10 @@ async fn stdio_listen_transport_emits_connection_and_request_metrics() {
                 .collect::<Vec<_>>()
         })
         .collect::<Vec<_>>();
-    assert!(metric_names.contains(&"exec_server.connections.active".to_string()));
-    assert!(metric_names.contains(&"exec_server.connections.total".to_string()));
-    assert!(metric_names.contains(&"exec_server.requests.total".to_string()));
-    assert!(metric_names.contains(&"exec_server.request.duration".to_string()));
+    assert!(metric_names.contains(&"exec_server_connections_active".to_string()));
+    assert!(metric_names.contains(&"exec_server_connections_total".to_string()));
+    assert!(metric_names.contains(&"exec_server_requests_total".to_string()));
+    assert!(metric_names.contains(&"exec_server_request_duration_seconds".to_string()));
 }
 
 #[test]
