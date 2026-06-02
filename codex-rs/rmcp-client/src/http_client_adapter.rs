@@ -46,9 +46,12 @@ const EVENT_STREAM_MIME_TYPE: &str = "text/event-stream";
 const JSON_MIME_TYPE: &str = "application/json";
 const HEADER_SESSION_ID: &str = "Mcp-Session-Id";
 const NON_JSON_RESPONSE_BODY_PREVIEW_BYTES: usize = 8_192;
+const STREAMABLE_HTTP_POST_MESSAGE_FAILURE_METRIC: &str =
+    "codex.mcp.streamable_http.post_message.failure";
 
 #[derive(Clone)]
 pub(crate) struct StreamableHttpClientAdapter {
+    server_name: String,
     http_client: Arc<dyn HttpClient>,
     default_headers: HeaderMap,
     auth_provider: Option<SharedAuthProvider>,
@@ -66,11 +69,13 @@ pub(crate) enum StreamableHttpClientAdapterError {
 
 impl StreamableHttpClientAdapter {
     pub(crate) fn new(
+        server_name: &str,
         http_client: Arc<dyn HttpClient>,
         default_headers: HeaderMap,
         auth_provider: Option<SharedAuthProvider>,
     ) -> Self {
         Self {
+            server_name: server_name.to_string(),
             http_client,
             default_headers,
             auth_provider,
@@ -140,12 +145,14 @@ impl StreamableHttpClient for StreamableHttpClientAdapter {
         let (response, mut body_stream) = match response {
             Ok(response) => response,
             Err(error) => {
-                log_post_message_http_error(
+                record_post_message_http_error(
+                    &self.server_name,
                     &uri,
                     mcp_method.as_deref(),
                     mcp_request_id.as_deref(),
                     has_session_id,
                     has_authorization_header,
+                    &error,
                 );
                 return Err(StreamableHttpError::Client(
                     StreamableHttpClientAdapterError::from(error),
@@ -385,14 +392,24 @@ fn client_jsonrpc_message_fields(
     }
 }
 
-fn log_post_message_http_error(
+fn record_post_message_http_error(
+    server_name: &str,
     uri: &str,
     mcp_method: Option<&str>,
     mcp_request_id: Option<&str>,
     has_session_id: bool,
     has_authorization_header: bool,
+    error: &ExecServerError,
 ) {
     let parsed_url = reqwest::Url::parse(uri).ok();
+    emit_post_message_failure_metric(PostMessageFailureMetricFields {
+        server_name,
+        parsed_url: parsed_url.as_ref(),
+        mcp_method,
+        has_session_id,
+        has_authorization_header,
+        error,
+    });
     tracing::warn!(
         endpoint_scheme = parsed_url
             .as_ref()
@@ -413,6 +430,108 @@ fn log_post_message_http_error(
         has_authorization_header = has_authorization_header,
         "streamable HTTP post_message failed"
     );
+}
+
+struct PostMessageFailureMetricFields<'a> {
+    server_name: &'a str,
+    parsed_url: Option<&'a reqwest::Url>,
+    mcp_method: Option<&'a str>,
+    has_session_id: bool,
+    has_authorization_header: bool,
+    error: &'a ExecServerError,
+}
+
+fn emit_post_message_failure_metric(fields: PostMessageFailureMetricFields<'_>) {
+    let Some(metrics) = codex_otel::global() else {
+        return;
+    };
+    let tags = post_message_failure_metric_tags(fields);
+    let tag_refs: Vec<(&str, &str)> = tags
+        .iter()
+        .map(|(key, value)| (*key, value.as_str()))
+        .collect();
+    let _ = metrics.counter(
+        STREAMABLE_HTTP_POST_MESSAGE_FAILURE_METRIC,
+        /*inc*/ 1,
+        &tag_refs,
+    );
+}
+
+fn post_message_failure_metric_tags(
+    fields: PostMessageFailureMetricFields<'_>,
+) -> Vec<(&'static str, String)> {
+    vec![
+        (
+            "server_name",
+            codex_otel::sanitize_metric_tag_value(fields.server_name),
+        ),
+        (
+            "endpoint_scheme",
+            codex_otel::sanitize_metric_tag_value(
+                fields
+                    .parsed_url
+                    .map(reqwest::Url::scheme)
+                    .unwrap_or("invalid"),
+            ),
+        ),
+        (
+            "endpoint_host",
+            codex_otel::sanitize_metric_tag_value(
+                fields
+                    .parsed_url
+                    .and_then(reqwest::Url::host_str)
+                    .unwrap_or("invalid"),
+            ),
+        ),
+        (
+            "endpoint_path",
+            codex_otel::sanitize_metric_tag_value(
+                fields
+                    .parsed_url
+                    .map(reqwest::Url::path)
+                    .unwrap_or("invalid"),
+            ),
+        ),
+        (
+            "endpoint_has_query",
+            fields
+                .parsed_url
+                .is_some_and(|url| url.query().is_some())
+                .to_string(),
+        ),
+        (
+            "mcp_method",
+            codex_otel::sanitize_metric_tag_value(fields.mcp_method.unwrap_or("none")),
+        ),
+        ("has_session_id", fields.has_session_id.to_string()),
+        (
+            "has_authorization_header",
+            fields.has_authorization_header.to_string(),
+        ),
+        (
+            "error_type",
+            codex_otel::sanitize_metric_tag_value(exec_server_error_type(fields.error)),
+        ),
+    ]
+}
+
+fn exec_server_error_type(error: &ExecServerError) -> &'static str {
+    match error {
+        ExecServerError::Spawn(_) => "spawn",
+        ExecServerError::WebSocketConnectTimeout { .. } => "websocket_connect_timeout",
+        ExecServerError::WebSocketConnect { .. } => "websocket_connect",
+        ExecServerError::InitializeTimedOut { .. } => "initialize_timed_out",
+        ExecServerError::Closed => "closed",
+        ExecServerError::Disconnected(_) => "disconnected",
+        ExecServerError::Json(_) => "json",
+        ExecServerError::HttpRequest(_) => "http_request",
+        ExecServerError::Protocol(_) => "protocol",
+        ExecServerError::Server { .. } => "server",
+        ExecServerError::EnvironmentRegistryHttp { .. } => "environment_registry_http",
+        ExecServerError::EnvironmentRegistryConfig(_) => "environment_registry_config",
+        ExecServerError::EnvironmentRegistryAuth(_) => "environment_registry_auth",
+        ExecServerError::EnvironmentRegistryRequest(_) => "environment_registry_request",
+    }
 }
 
 fn insert_header<Error>(
@@ -489,4 +608,52 @@ fn sse_stream_from_body(
         }
     }))
     .boxed()
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use pretty_assertions::assert_eq;
+
+    use super::*;
+
+    #[test]
+    fn post_message_failure_metric_tags_include_initialize_endpoint() {
+        let url = reqwest::Url::parse("https://chatgpt.com/backend-api/wham/apps").unwrap();
+        let error = ExecServerError::HttpRequest("error sending request".to_string());
+
+        let tags = post_message_failure_metric_tags(PostMessageFailureMetricFields {
+            server_name: "codex_apps",
+            parsed_url: Some(&url),
+            mcp_method: Some("initialize"),
+            has_session_id: false,
+            has_authorization_header: true,
+            error: &error,
+        });
+
+        assert_eq!(
+            tags,
+            vec![
+                ("server_name", "codex_apps".to_string()),
+                ("endpoint_scheme", "https".to_string()),
+                ("endpoint_host", "chatgpt.com".to_string()),
+                ("endpoint_path", "/backend-api/wham/apps".to_string()),
+                ("endpoint_has_query", "false".to_string()),
+                ("mcp_method", "initialize".to_string()),
+                ("has_session_id", "false".to_string()),
+                ("has_authorization_header", "true".to_string()),
+                ("error_type", "http_request".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn exec_server_error_type_covers_timeout_variant() {
+        let error = ExecServerError::InitializeTimedOut {
+            timeout: Duration::from_secs(5),
+        };
+
+        assert_eq!(exec_server_error_type(&error), "initialize_timed_out");
+    }
 }
