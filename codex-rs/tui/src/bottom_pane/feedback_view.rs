@@ -15,15 +15,18 @@ use ratatui::widgets::Paragraph;
 use ratatui::widgets::StatefulWidgetRef;
 use ratatui::widgets::Widget;
 use std::cell::RefCell;
+use std::time::Instant;
 
 use crate::app_event::AppEvent;
 use crate::app_event::FeedbackCategory;
 use crate::app_event_sender::AppEventSender;
 use crate::history_cell;
+use crate::key_hint::has_ctrl_or_alt;
 use crate::render::renderable::Renderable;
 
 use super::CancellationEvent;
 use super::bottom_pane_view::BottomPaneView;
+use super::paste_burst::PasteBurst;
 use super::popup_consts::standard_popup_hint_line;
 use super::textarea::TextArea;
 use super::textarea::TextAreaState;
@@ -54,6 +57,7 @@ pub(crate) struct FeedbackNoteView {
     // UI state
     textarea: TextArea,
     textarea_state: RefCell<TextAreaState>,
+    paste_burst: PasteBurst,
     complete: bool,
 }
 
@@ -71,6 +75,7 @@ impl FeedbackNoteView {
             include_logs,
             textarea: TextArea::new(),
             textarea_state: RefCell::new(TextAreaState::default()),
+            paste_burst: PasteBurst::default(),
             complete: false,
         }
     }
@@ -86,10 +91,8 @@ impl FeedbackNoteView {
         });
         self.complete = true;
     }
-}
 
-impl BottomPaneView for FeedbackNoteView {
-    fn handle_key_event(&mut self, key_event: KeyEvent) {
+    fn handle_key_event_at(&mut self, key_event: KeyEvent, now: Instant) {
         match key_event {
             KeyEvent {
                 code: KeyCode::Esc, ..
@@ -98,21 +101,53 @@ impl BottomPaneView for FeedbackNoteView {
             }
             KeyEvent {
                 code: KeyCode::Enter,
-                modifiers: KeyModifiers::NONE,
+                modifiers,
                 ..
             } => {
-                self.submit();
+                if self.paste_burst.direct_insert_newline_should_insert(now) {
+                    self.paste_burst.extend_window(now);
+                    self.textarea.insert_str("\n");
+                    return;
+                }
+                if modifiers == KeyModifiers::NONE {
+                    self.submit();
+                } else {
+                    self.textarea.input(key_event);
+                }
             }
             KeyEvent {
-                code: KeyCode::Enter,
+                code: KeyCode::Char(_),
+                modifiers,
                 ..
-            } => {
+            } if !has_ctrl_or_alt(modifiers) && self.textarea.allows_paste_burst() => {
+                let paste_like_burst = self.paste_burst.on_plain_char_no_hold(now).is_some();
                 self.textarea.input(key_event);
+                if paste_like_burst {
+                    self.paste_burst.extend_window(now);
+                }
+            }
+            KeyEvent {
+                code: KeyCode::Tab,
+                modifiers,
+                ..
+            } if !has_ctrl_or_alt(modifiers) && self.textarea.allows_paste_burst() => {
+                let in_paste_burst = self.paste_burst.direct_insert_newline_should_insert(now);
+                self.textarea.input(key_event);
+                if in_paste_burst {
+                    self.paste_burst.extend_window(now);
+                }
             }
             other => {
                 self.textarea.input(other);
+                self.paste_burst.clear_after_explicit_paste();
             }
         }
+    }
+}
+
+impl BottomPaneView for FeedbackNoteView {
+    fn handle_key_event(&mut self, key_event: KeyEvent) {
+        self.handle_key_event_at(key_event, Instant::now());
     }
 
     fn on_ctrl_c(&mut self) -> CancellationEvent {
@@ -129,6 +164,7 @@ impl BottomPaneView for FeedbackNoteView {
             return false;
         }
         self.textarea.insert_str(&pasted);
+        self.paste_burst.clear_after_explicit_paste();
         true
     }
 }
@@ -929,5 +965,108 @@ mod tests {
             assert!(rendered.contains("Please open an issue using the following URL:"));
             assert!(rendered.contains("thread-4"));
         }
+    }
+
+    fn elapsed(ms: usize) -> std::time::Duration {
+        std::time::Duration::from_millis(ms as u64)
+    }
+
+    #[test]
+    fn paste_burst_newline_does_not_submit_short_first_line() {
+        let now = Instant::now();
+
+        for (first_line, second_line) in [("x", "rest"), ("id", "body"), ("foo", "bar")] {
+            let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+            let tx = AppEventSender::new(tx_raw);
+            let mut view =
+                FeedbackNoteView::new(FeedbackCategory::Bug, None, tx, /*include_logs*/ true);
+            let mut ms = 0;
+
+            for ch in first_line.chars() {
+                view.handle_key_event_at(KeyEvent::from(KeyCode::Char(ch)), now + elapsed(ms));
+                ms += 1;
+            }
+            view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), now + elapsed(ms));
+            ms += 1;
+            for ch in second_line.chars() {
+                view.handle_key_event_at(KeyEvent::from(KeyCode::Char(ch)), now + elapsed(ms));
+                ms += 1;
+            }
+
+            assert!(rx.try_recv().is_err());
+            assert!(!view.is_complete());
+
+            view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), now + elapsed(/*ms*/ 200));
+
+            let event = rx.try_recv().expect("submit feedback event");
+            assert!(matches!(
+                &event,
+                AppEvent::SubmitFeedback {
+                    reason: Some(reason),
+                    ..
+                } if reason == &format!("{first_line}\n{second_line}")
+            ));
+            assert!(view.is_complete());
+        }
+    }
+
+    #[test]
+    fn paste_burst_newline_after_tab_does_not_submit() {
+        let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut view =
+            FeedbackNoteView::new(FeedbackCategory::Bug, None, tx, /*include_logs*/ true);
+        let now = Instant::now();
+        let mut ms = 0;
+
+        view.handle_key_event_at(KeyEvent::from(KeyCode::Char('x')), now + elapsed(ms));
+        ms += 1;
+        view.handle_key_event_at(KeyEvent::from(KeyCode::Tab), now + elapsed(ms));
+        ms += 1;
+        view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), now + elapsed(ms));
+        ms += 1;
+        for ch in "rest".chars() {
+            view.handle_key_event_at(KeyEvent::from(KeyCode::Char(ch)), now + elapsed(ms));
+            ms += 1;
+        }
+
+        assert!(rx.try_recv().is_err());
+        assert!(!view.is_complete());
+
+        view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), now + elapsed(/*ms*/ 200));
+
+        let event = rx.try_recv().expect("submit feedback event");
+        assert!(matches!(
+            &event,
+            AppEvent::SubmitFeedback {
+                reason: Some(reason),
+                ..
+            } if reason == "x\nrest"
+        ));
+        assert!(view.is_complete());
+    }
+
+    #[test]
+    fn delayed_enter_after_typing_submits() {
+        let (tx_raw, mut rx) = tokio::sync::mpsc::unbounded_channel::<AppEvent>();
+        let tx = AppEventSender::new(tx_raw);
+        let mut view =
+            FeedbackNoteView::new(FeedbackCategory::Bug, None, tx, /*include_logs*/ true);
+        let now = Instant::now();
+
+        for (idx, ch) in "foo".chars().enumerate() {
+            view.handle_key_event_at(KeyEvent::from(KeyCode::Char(ch)), now + elapsed(idx * 20));
+        }
+        view.handle_key_event_at(KeyEvent::from(KeyCode::Enter), now + elapsed(/*ms*/ 80));
+
+        let event = rx.try_recv().expect("submit feedback event");
+        assert!(matches!(
+            &event,
+            AppEvent::SubmitFeedback {
+                reason: Some(reason),
+                ..
+            } if reason == "foo"
+        ));
+        assert!(view.is_complete());
     }
 }
